@@ -96,6 +96,30 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit, onOpenPrefs: () ->
     var soulEditIsNew by remember { mutableStateOf(false) }
     val context = androidx.compose.ui.platform.LocalContext.current
 
+    // 🔴 ZorvAI 同款结构：ModalNavigationDrawer 包在 Scaffold **外面**——
+    // 抽屉全屏高、遮罩盖住顶栏；放 Scaffold 内部会被顶栏裁剪（已踩坑）。
+    ModalNavigationDrawer(
+        drawerState = drawerState,
+        gesturesEnabled = drawerState.isOpen,
+        drawerContent = {
+            ModalDrawerSheet(
+                drawerContainerColor = Paper2,
+                drawerTonalElevation = 8.dp,
+                windowInsets = androidx.compose.foundation.layout.WindowInsets(0, 0, 0, 0),
+            ) {
+                ConversationDrawer(
+                    conversations = vm.conversations,
+                    currentId = vm.current?.id,
+                    onPick = { vm.pick(it); closeDrawer() },
+                    onDelete = { vm.deleteConversation(it) },
+                    onNew = { vm.newConversation(); closeDrawer() },
+                    onSoul = { soulSheetOpen = true },
+                    onDeleteAll = { vm.deleteAllConversations() },
+                    onClose = { closeDrawer() }
+                )
+            }
+        }
+    ) {
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         topBar = {
@@ -122,8 +146,8 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit, onOpenPrefs: () ->
                     }
                 },
                 actions = {
-                    ModelChip(vm.config, onOpenSettings)
-                    // 次级操作收进「更多」菜单：顶栏只留状态胶囊 + 一个入口（成熟客户端惯例）
+                    // 模型名已在标题副行显示，右侧胶囊删除（重复信息只会让顶栏更乱）；点 ⋮ 可进模型配置
+                    // 次级操作收进「更多」菜单：顶栏只留一个入口
                     var menuOpen by remember { mutableStateOf(false) }
                     Box {
                         IconButton(onClick = { menuOpen = true }) {
@@ -186,34 +210,11 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit, onOpenPrefs: () ->
             )
         }
     ) { pad ->
-        // 🔴 标准 ModalNavigationDrawer：层级/遮罩/手势由框架保证，不再手搓浮层
-        ModalNavigationDrawer(
-            drawerState = drawerState,
-            gesturesEnabled = drawerState.isOpen,
-            drawerContent = {
-                ModalDrawerSheet(
-                    drawerContainerColor = Paper2,
-                    drawerTonalElevation = 8.dp,
-                    windowInsets = androidx.compose.foundation.layout.WindowInsets(0, 0, 0, 0),
-                ) {
-                    ConversationDrawer(
-                        conversations = vm.conversations,
-                        currentId = vm.current?.id,
-                        onPick = { vm.pick(it); closeDrawer() },
-                        onDelete = { vm.deleteConversation(it) },
-                        onNew = { vm.newConversation(); closeDrawer() },
-                        onSoul = { soulSheetOpen = true },
-                        onDeleteAll = { vm.deleteAllConversations() },
-                        onClose = { closeDrawer() }
-                    )
-                }
-            }
-        ) {
-            Column(Modifier.padding(pad).fillMaxSize()) {
-                ChatArea(vm, Modifier.weight(1f), onEdit = { editing = it; editText = it.content })
-                ComposerBar(vm)
-            }
+        Column(Modifier.padding(pad).fillMaxSize()) {
+            ChatArea(vm, Modifier.weight(1f), onEdit = { editing = it; editText = it.content })
+            ComposerBar(vm)
         }
+    }
     }
 
     
