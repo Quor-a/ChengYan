@@ -373,8 +373,8 @@ private fun ConversationDrawer(
         color = Paper2,
         shadowElevation = 12.dp
     ) {
-        Column(Modifier.padding(12.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 14.dp).padding(top = 14.dp, bottom = 12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
                 Box(
                     Modifier.size(34.dp).background(Accent, RoundedCornerShape(10.dp)),
                     contentAlignment = Alignment.Center
@@ -382,12 +382,13 @@ private fun ConversationDrawer(
                     Text("言", color = Color.White, fontFamily = androidx.compose.ui.text.font.FontFamily.Serif, fontSize = 17.sp)
                 }
                 Spacer(Modifier.width(10.dp))
-                Column {
+                Column(Modifier.weight(1f)) {
                     Text("澄言", fontFamily = androidx.compose.ui.text.font.FontFamily.Serif, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold)
                     Text("CHENGYAN", fontSize = 9.sp, letterSpacing = 3.sp, color = Ink3, fontFamily = FontFamily.Monospace)
                 }
-                Spacer(Modifier.weight(1f))
-                TextButton(onClick = onClose) { Text("收起", style = MaterialTheme.typography.labelSmall, color = Ink3) }
+                IconButton(onClick = onClose, modifier = Modifier.size(30.dp)) {
+                    Text("✕", fontSize = 15.sp, color = Ink3)
+                }
             }
             Spacer(Modifier.height(12.dp))
             OutlinedTextField(
@@ -406,36 +407,43 @@ private fun ConversationDrawer(
             Spacer(Modifier.height(10.dp))
             Button(
                 onClick = onNew,
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.fillMaxWidth().height(42.dp),
                 shape = RoundedCornerShape(12.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = AccentSoft, contentColor = AccentInk)
+                colors = ButtonDefaults.buttonColors(containerColor = AccentSoft, contentColor = AccentInk),
+                contentPadding = PaddingValues(vertical = 8.dp)
             ) {
                 Icon(Icons.Rounded.Add, null, Modifier.size(15.dp))
                 Spacer(Modifier.width(6.dp))
                 Text("新对话", letterSpacing = 1.5.sp)
             }
-            Spacer(Modifier.height(8.dp))
-            // 日期分组（今天 / 昨天 / 7 天内 / 更早）：成熟的会话列表惯例
-            val filtered = conversations
-                .filter { query.isBlank() || it.title.contains(query) || it.messages.any { m -> m.content.contains(query) } }
-                .sortedByDescending { it.updated }
+            Spacer(Modifier.height(2.dp))
+            // 日期分组（今天 / 昨天 / 7 天内 / 更早）
+            // 🔴 分组区间必须互斥（下界闭、上界开），否则同一条对话命中两组 → LazyColumn key 撞车闪退
+            val filtered = remember(conversations, query) {
+                conversations.distinctBy { it.id }
+                    .filter { query.isBlank() || it.title.contains(query) || it.messages.any { m -> m.content.contains(query) } }
+                    .sortedByDescending { it.updated }
+            }
             val groups = remember(filtered) {
                 val now = System.currentTimeMillis()
                 val day = 24 * 3600_000L
+                val age = { c: Conversation -> now - c.updated }
                 listOf(
-                    "今天" to { c: Conversation -> now - c.updated < day },
-                    "昨天" to { c: Conversation -> now - c.updated < 2 * day },
-                    "7 天内" to { c: Conversation -> now - c.updated < 7 * day },
-                    "更早" to { _: Conversation -> true },
+                    "今天" to { c: Conversation -> age(c) in 0 until day },
+                    "昨天" to { c: Conversation -> age(c) in day until 2 * day },
+                    "7 天内" to { c: Conversation -> age(c) in 2 * day until 7 * day },
+                    "更早" to { c: Conversation -> age(c) >= 7 * day },
                 )
             }
-            LazyColumn(Modifier.padding(top = 4.dp)) {
+            LazyColumn(Modifier.padding(top = 4.dp), verticalArrangement = Arrangement.spacedBy(1.dp)) {
                 for ((label, pred) in groups) {
                     val items = filtered.filter(pred)
                     if (items.isEmpty()) continue
                     item(key = "sec_$label") {
-                        Text(label, style = MaterialTheme.typography.labelSmall, fontSize = 10.sp, letterSpacing = 1.sp,
-                            color = Ink4, modifier = Modifier.padding(start = 8.dp, top = 12.dp, bottom = 4.dp))
+                        Text(
+                            label, style = MaterialTheme.typography.labelSmall, fontSize = 10.sp, letterSpacing = 1.5.sp,
+                            color = Ink4, modifier = Modifier.padding(start = 12.dp, top = 14.dp, bottom = 5.dp),
+                        )
                     }
                     itemsIndexed(items, key = { i, c -> "conv_${c.id}_$i" }) { _, c ->
                         ConversationRow(c, c.id == currentId, onPick, onDelete)
@@ -472,19 +480,23 @@ private fun ConversationRow(c: Conversation, active: Boolean, onPick: (Long) -> 
                     .background(if (active) Accent else Color.Transparent, RoundedCornerShape(2.dp))
             )
             Column(Modifier.weight(1f).padding(horizontal = 9.dp, vertical = 9.dp)) {
-                Text(c.title, style = MaterialTheme.typography.bodySmall,
-                    color = if (active) Ink else Ink2,
-                    fontWeight = if (active) androidx.compose.ui.text.font.FontWeight.SemiBold else null,
-                    maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(c.title, style = MaterialTheme.typography.bodySmall,
+                        color = if (active) Ink else Ink2,
+                        fontWeight = if (active) androidx.compose.ui.text.font.FontWeight.SemiBold else null,
+                        maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f))
+                    Text(relTime(c.updated), style = MaterialTheme.typography.labelSmall, fontSize = 10.sp,
+                        color = Ink4, fontFamily = FontFamily.Monospace)
+                    if (active) {
+                        Spacer(Modifier.width(6.dp))
+                        Icon(Icons.Rounded.DeleteOutline, "删除", Modifier.size(15.dp).clickable { onDelete(c.id) }, tint = Ink3)
+                    }
+                }
                 val last = c.messages.lastOrNull()?.content?.replace("\n", " ")
                 if (last != null) Text(last, style = MaterialTheme.typography.labelSmall, fontSize = 11.sp, color = Ink3,
-                    maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
-            }
-            Text(relTime(c.updated), style = MaterialTheme.typography.labelSmall, fontSize = 10.sp, color = Ink4, fontFamily = FontFamily.Monospace)
-            Spacer(Modifier.width(6.dp))
-            if (active) {
-                Icon(Icons.Rounded.DeleteOutline, "删除", Modifier.size(15.dp).clickable { onDelete(c.id) }, tint = Ink3)
-                Spacer(Modifier.width(10.dp))
+                    maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(top = 2.dp))
             }
         }
     }
