@@ -10,6 +10,7 @@ import com.chengyan.app.data.AssistantPreset
 import com.chengyan.app.data.ChatStore
 import com.chengyan.app.data.Conversation
 import com.chengyan.app.data.Message
+import com.chengyan.app.core.model.toProfile
 import com.chengyan.app.data.ApiProviderType
 import com.chengyan.app.data.ModelConfig
 import com.chengyan.app.data.SettingsStore
@@ -21,11 +22,28 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 class ChatViewModel(
+    private val appContext: android.content.Context,
     private val settings: SettingsStore,
     private val chats: ChatStore,
 ) : ViewModel() {
 
     private val client = OpenAiClient()
+
+    // ---- ZorvAI 云模型配置层（完整移植自 Quor-a/ZorvAI core/model） ----
+    val quroConfigRepo = com.chengyan.app.core.model.QuroModelConfigRepository(appContext)
+    val quroProfileRepo = com.chengyan.app.core.model.QuroSavedProfileRepository(appContext)
+    val quroCustomProviderRepo = com.chengyan.app.core.model.QuroCustomProviderRepository(appContext)
+    val quroMultiProviderRepo = com.chengyan.app.core.model.QuroMultiProviderRepository(appContext)
+
+    /** ZorvAI 风格的活跃模型配置（与下方 ModelConfig 同步）。 */
+    var quroConfig by mutableStateOf(com.chengyan.app.core.model.QuroModelConfig())
+        private set
+    /** ZorvAI 风格的已保存预设列表。 */
+    var quroProfiles by mutableStateOf(quroProfileRepo.loadAll())
+        private set
+    /** ZorvAI 风格的用户自建供应商列表。 */
+    var quroCustomProviders by mutableStateOf(quroCustomProviderRepo.loadAll())
+        private set
 
     var config by mutableStateOf(ModelConfig())
         private set
@@ -50,6 +68,22 @@ class ChatViewModel(
     init {
         viewModelScope.launch { config = settings.config.first() }
         viewModelScope.launch { profiles = settings.profiles.first() }
+        // 加载 ZorvAI 配置层并同步到既有 ModelConfig；同时把预设登记进多提供商仓库（故障转移用）
+        viewModelScope.launch {
+            quroConfig = quroConfigRepo.load()
+            quroProfiles = quroProfileRepo.loadAll()
+            quroCustomProviders = quroCustomProviderRepo.loadAll()
+            syncFromQuro(quroConfig)
+            quroProfiles.forEach { p ->
+                quroMultiProviderRepo.addConfig(com.chengyan.app.core.model.QuroProviderConfig(
+                    id = p.id, name = p.name,
+                    providerType = com.chengyan.app.core.model.ApiProviderType.fromProviderTypeId(p.provider)
+                        ?: com.chengyan.app.core.model.ApiProviderType.OPENAI_GENERIC,
+                    baseUrl = p.baseUrl, apiKey = p.apiKey, defaultModel = p.model,
+                    priority = quroProfiles.indexOfFirst { it.id == p.id }
+                ))
+            }
+        }
         viewModelScope.launch {
             chats.conversations.collect { list ->
                 conversations = list
@@ -61,6 +95,87 @@ class ChatViewModel(
     fun saveConfig(c: ModelConfig) {
         config = c
         viewModelScope.launch { settings.save(c) }
+    }
+
+    /* ---------- ZorvAI 配置层：保存 / 同步 / 预设 / 自建供应商 ---------- */
+
+    /** ZorvAI 语义下的有效上下文窗口：contextWindow / modelContextLength / maxInputTokens 取较小值（0 视为不设限）。 */
+    fun effectiveContextWindow(q: com.chengyan.app.core.model.QuroModelConfig): Int =
+        listOfNotNull(
+            q.contextWindow.takeIf { it > 0 },
+            q.modelContextLength.takeIf { it > 0 },
+            q.maxInputTokens.takeIf { it > 0 },
+        ).minOrNull() ?: 1048576
+
+    /** 把 ZorvAI 活跃配置同步到澄言既有 ModelConfig（流式客户端消费）。 */
+    private fun syncFromQuro(q: com.chengyan.app.core.model.QuroModelConfig) {
+        config = config.copy(
+            url = q.baseUrl, key = q.apiKey, model = q.model,
+            temperature = q.temperature,
+            maxTokens = q.maxTokens, enableTools = q.enableTools,
+            contextWindow = effectiveContextWindow(q)
+        )
+        viewModelScope.launch { settings.save(config) }
+    }
+
+    /** 保存 ZorvAI 活跃配置（等价 QuroModelConfigRepository.save + 内存同步）。 */
+    fun saveQuroConfig(q: com.chengyan.app.core.model.QuroModelConfig) {
+        quroConfig = q
+        quroConfigRepo.save(q)
+        syncFromQuro(q)
+    }
+
+    /** 保存当前配置为命名预设（QurSavedProfile.toProfile）。 */
+    fun saveQuroProfile(name: String) {
+        val p = quroConfig.toProfile(name)
+        quroProfileRepo.save(p)
+        quroProfiles = quroProfileRepo.loadAll()
+        quroMultiProviderRepo.addConfig(com.chengyan.app.core.model.QuroProviderConfig(
+            id = p.id, name = p.name,
+            providerType = com.chengyan.app.core.model.ApiProviderType.fromProviderTypeId(p.provider)
+                ?: com.chengyan.app.core.model.ApiProviderType.OPENAI_GENERIC,
+            baseUrl = p.baseUrl, apiKey = p.apiKey, defaultModel = p.model,
+            priority = quroProfiles.indexOfFirst { it.id == p.id }
+        ))
+        _toast.value = "已保存档案「$name」"
+    }
+
+    /** 应用预设（QuroSavedProfileRepository.applyToConfig）。 */
+    fun applyQuroProfile(p: com.chengyan.app.core.model.QuroSavedProfile) {
+        quroProfileRepo.applyToConfig(p, quroConfigRepo)
+        quroConfig = quroConfigRepo.load()
+        syncFromQuro(quroConfig)
+        _toast.value = "已切换到「${p.name}」"
+    }
+
+    fun deleteQuroProfile(id: String) {
+        quroProfileRepo.delete(id)
+        quroProfiles = quroProfileRepo.loadAll()
+        quroMultiProviderRepo.removeConfig(id)
+    }
+
+    /** 添加用户自建供应商（QuroCustomProviderRepository.upsert）。 */
+    fun addCustomProvider(name: String, baseUrl: String, defaultModel: String) {
+        val p = com.chengyan.app.core.model.QuroCustomProvider(
+            id = java.util.UUID.randomUUID().toString(),
+            name = name, baseUrl = baseUrl.trim().trimEnd('/'),
+            defaultModel = defaultModel.trim()
+        )
+        quroCustomProviderRepo.upsert(p)
+        quroCustomProviders = quroCustomProviderRepo.loadAll()
+        _toast.value = "已添加供应商「$name」"
+    }
+
+    fun deleteCustomProvider(id: String) {
+        quroCustomProviderRepo.delete(id)
+        quroCustomProviders = quroCustomProviderRepo.loadAll()
+    }
+
+    /** 选中模型后回填其真实上下文长度（等价 ZorvAI modelContextLength 回填逻辑）。 */
+    fun applyModelContextLength(cl: Int) {
+        if (cl > 0 && quroConfig.modelContextLength != cl) {
+            saveQuroConfig(quroConfig.copy(modelContextLength = cl))
+        }
     }
 
     /* ---------- 供应商档案 ---------- */
@@ -92,23 +207,22 @@ class ChatViewModel(
         _toast.value = "已切换到「${p.name}」"
     }
 
-    /** 健康记录：成功/失败后更新对应档案（移植自 ZorvAI QuroMultiProviderRepository 健康检查）。 */
+    /** 健康记录：成功/失败后更新对应提供商（QuroMultiProviderRepository.updateHealthStatus）。 */
     private fun markProfile(url: String, ok: Boolean) {
-        var changed = false
-        profiles = profiles.map { p ->
-            if (p.url == url) {
-                changed = true
-                if (ok) p.copy(health = "HEALTHY", consecutiveFailures = 0)
-                else p.copy(health = "FAILED", consecutiveFailures = p.consecutiveFailures + 1)
-            } else p
-        }
-        if (changed) viewModelScope.launch { settings.saveProfiles(profiles) }
+        val id = quroMultiProviderRepo.getAllConfigs().firstOrNull { it.baseUrl == url }?.id ?: return
+        quroMultiProviderRepo.updateHealthStatus(
+            id,
+            if (ok) com.chengyan.app.core.model.QuroProviderConfig.HealthStatus.HEALTHY
+            else com.chengyan.app.core.model.QuroProviderConfig.HealthStatus.FAILED,
+            if (ok) "" else "请求失败"
+        )
     }
 
-    /** 故障转移候选：按优先级找下一个健康档案（FAST_FAIL 策略，移植自 ZorvAI FailoverConfig）。 */
-    private fun failoverCandidate(failedUrl: String): ApiProfile? =
-        profiles.filter { it.url != failedUrl && it.key.isNotBlank() && it.model.isNotBlank() }
-            .sortedBy { it.priority }.firstOrNull { it.health != "FAILED" || it.consecutiveFailures < 3 }
+    /** 故障转移候选（QuroMultiProviderRepository.getNextProvider，FAST_FAIL 策略）。 */
+    private fun failoverCandidate(failedUrl: String): com.chengyan.app.core.model.QuroProviderConfig? {
+        val curId = quroMultiProviderRepo.getAllConfigs().firstOrNull { it.baseUrl == failedUrl }?.id
+        return quroMultiProviderRepo.getNextProvider(curId)
+    }
 
     /* ---------- 助手 ---------- */
     fun startWithAssistant(a: AssistantPreset?) {
@@ -258,7 +372,8 @@ class ChatViewModel(
         val trimmed = turns.mapIndexed { i, t -> if (i < cutoff) t.copy(images = emptyList()) else t }
         // 上下文预算裁剪（移植自 ZorvAI 上下文压缩思路）：估算 token 超过 contextWindow 时从最旧的消息裁起，system 保留
         fun estimate(t: OpenAiClient.ChatTurn): Int = t.text.length / 2 + t.images.size * 800
-        var budget = (config.contextWindow * 0.85).toInt()
+        var budget = (config.contextWindow * (quroConfig.contextCompressThreshold.takeIf { it in 1..100 } ?: 80) / 100)
+            .coerceAtLeast(4096)
         var used = trimmed.sumOf { estimate(it) }
         var start = 0
         while (used > budget && start < trimmed.size - 1 && trimmed[start].role != "user") {
@@ -350,18 +465,17 @@ class ChatViewModel(
                 c.updated = System.currentTimeMillis()
                 persist()
                 current = null; current = c
-                // 自动故障转移：本次失败且未产出内容 → 切到下一个健康档案并重试一次
+                // 自动故障转移（QuroMultiProviderRepository.getNextProvider）：本次失败且未产出内容 → 切到下一个健康提供商并重试一次
                 if (allowFailover && ai.isError && ai.content.startsWith("请求失败") && ai.toolCalls.isEmpty()) {
                     val candidate = failoverCandidate(config.url)
                     if (candidate != null) {
                         c.messages.remove(ai)
                         val prev = config
-                        saveConfig(ModelConfig(
-                            url = candidate.url, key = candidate.key, model = candidate.model,
-                            sysPrompt = prev.sysPrompt, temperature = prev.temperature,
-                            thinking = prev.thinking, providerType = candidate.providerType,
-                            maxTokens = prev.maxTokens, enableTools = prev.enableTools,
-                            contextWindow = prev.contextWindow
+                        saveQuroConfig(quroConfig.copy(
+                            provider = candidate.providerType.name,
+                            baseUrl = candidate.baseUrl,
+                            apiKey = candidate.apiKey,
+                            model = candidate.defaultModel.ifBlank { prev.model },
                         ))
                         _toast.value = "「${prev.model}」请求失败，已自动切换到「${candidate.name}」重试"
                         request(c, history, allowFailover = false)

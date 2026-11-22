@@ -19,10 +19,11 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         val settings = SettingsStore(this)
         val chats = ChatStore(this)
+        val appContext = applicationContext
         setContent {
             ChengYanTheme {
                 var showSettings by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
-                val vm: ChatViewModel = viewModel(factory = ChatViewModelFactory(settings, chats))
+                val vm: ChatViewModel = viewModel(factory = ChatViewModelFactory(appContext, settings, chats))
                 if (showSettings) {
                     SettingsScreen(
                         config = vm.config,
@@ -39,10 +40,11 @@ class MainActivity : ComponentActivity() {
 }
 
 class ChatViewModelFactory(
+    private val appContext: android.content.Context,
     private val settings: SettingsStore,
     private val chats: ChatStore,
 ) : androidx.lifecycle.ViewModelProvider.Factory {
     @Suppress("UNCHECKED_CAST")
     override fun <T : androidx.lifecycle.ViewModel> create(modelClass: Class<T>): T =
-        ChatViewModel(settings, chats) as T
+        ChatViewModel(appContext, settings, chats) as T
 }
