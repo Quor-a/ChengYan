@@ -62,6 +62,15 @@ class ChatViewModel(
     private val _toast = MutableStateFlow<String?>(null)
     val toast: StateFlow<String?> = _toast
     fun toastShown() { _toast.value = null }
+    /** 供 UI 主动提示（已复制等）。 */
+    fun showToast(msg: String) { _toast.value = msg }
+
+    /** 引用回复：长按消息菜单预填输入框的内容（ComposerBar 收集后清空）。 */
+    val composerPrefill = MutableStateFlow<String?>(null)
+    fun quoteReply(msg: Message) {
+        val quoted = msg.content.replace("\n", " ").take(80)
+        composerPrefill.value = "> $quoted\n\n"
+    }
 
     private var streamJob: Job? = null
 
@@ -351,7 +360,13 @@ class ChatViewModel(
     private fun historyUpTo(c: Conversation, endIdx: Int): List<OpenAiClient.ChatTurn> {
         val turns = mutableListOf<OpenAiClient.ChatTurn>()
         val sys = assistant?.prompt?.takeIf { it.isNotBlank() } ?: config.sysPrompt
-        if (sys.isNotBlank()) turns.add(OpenAiClient.ChatTurn("system", sys))
+        // 日期感知默认系统提示（成熟客户端惯例：系统提示注入当天日期；无自定义人设时给基线行为约束）
+        val effectiveSys = sys.ifBlank {
+            val df = java.text.SimpleDateFormat("yyyy年M月d日 EEEE", java.util.Locale.CHINESE)
+            "你是澄言，一个简洁、诚实、专业的中文 AI 助手。回答直接、结构清晰，" +
+            "不确定的内容要明确说明，不要编造。今天的日期：${df.format(java.util.Date())}。"
+        }
+        if (effectiveSys.isNotBlank()) turns.add(OpenAiClient.ChatTurn("system", effectiveSys))
         for (i in 0..endIdx.coerceAtMost(c.messages.size - 1)) {
             val m = c.messages[i]
             if (!m.isError) {
@@ -386,8 +401,31 @@ class ChatViewModel(
         return trimmed.drop(start)
     }
 
+    /** 首轮回复成功后用 LLM 自动起标题（ChatGPT/Open WebUI 惯例）；失败静默保留占位标题。 */
+    private fun autoTitle(c: Conversation) {
+        val firstUser = c.messages.firstOrNull { it.role == "user" } ?: return
+        val firstAi = c.messages.firstOrNull { it.role == "assistant" && !it.isError } ?: return
+        val cfg = config
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            val prompt = "根据下面这段对话，起一个不超过12个字的中文标题。只输出标题本身，不要引号、句号或任何解释。\n" +
+                "用户：${firstUser.content.take(300)}\n助手：${firstAi.content.take(300)}"
+            client.complete(cfg, prompt, maxTokens = 32).onSuccess { t ->
+                val title = t.trim().trim('"', '「', '」', '"', '"').replace("\n", " ").take(16)
+                if (title.isNotBlank()) {
+                    c.title = title
+                    c.updated = System.currentTimeMillis()
+                    persist()
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) { current = null; current = c }
+                }
+            }
+        }
+    }
+
     private fun request(c: Conversation, history: List<OpenAiClient.ChatTurn>, allowFailover: Boolean = true) {
         val now = System.currentTimeMillis()
+        // 占位标题判定：仍是首轮占位（首条用户消息前 18 字或「新对话」）才允许自动起标题覆盖
+        val placeholderTitle = c.messages.firstOrNull()?.content?.take(18).orEmpty()
+        val canAutoTitle = c.title == "新对话" || c.title == placeholderTitle || c.title.startsWith("新对话 · ")
         val ai = Message(com.chengyan.app.data.IdGen.next(), "assistant", "", now, model = config.model, streaming = true)
         c.messages.add(ai)
         streaming = true
@@ -482,6 +520,7 @@ class ChatViewModel(
                     }
                 } else if (!ai.isError && ai.content.isNotBlank()) {
                     markProfile(config.url, ok = true)
+                    if (canAutoTitle) autoTitle(c)
                 }
             }
         }

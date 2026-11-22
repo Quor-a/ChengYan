@@ -250,4 +250,32 @@ class OpenAiClient {
             }
         }
     }
+
+    /** 非流式一次性补全（自动起标题等轻量后台任务用：小 max_tokens，不进聊天流）。 */
+    suspend fun complete(config: ModelConfig, prompt: String, maxTokens: Int = 32): Result<String> =
+        kotlinx.coroutines.withContext(Dispatchers.IO) {
+            runCatching {
+                val body = buildJsonObject {
+                    put("model", config.model)
+                    put("temperature", 0.3)
+                    put("max_tokens", maxTokens)
+                    put("messages", turnsJson(listOf(ChatTurn("user", prompt))))
+                }.toString().toRequestBody("application/json".toMediaType())
+                val request = Request.Builder()
+                    .url(config.url.trimEnd('/') + "/chat/completions")
+                    .header("Authorization", "Bearer ${config.key}")
+                    .post(body).build()
+                client.newCall(request).execute().use { resp ->
+                    val text = resp.body?.string().orEmpty()
+                    if (!resp.isSuccessful) throw IllegalStateException("HTTP ${resp.code}")
+                    val obj = json.parseToJsonElement(text) as? kotlinx.serialization.json.JsonObject
+                    obj?.get("choices")?.let { c ->
+                        (c as? kotlinx.serialization.json.JsonArray)?.firstOrNull()
+                    }?.let { ch -> (ch as? kotlinx.serialization.json.JsonObject)?.get("message") }
+                        ?.let { m -> (m as? kotlinx.serialization.json.JsonObject)?.get("content") }
+                        ?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content }
+                        ?: throw IllegalStateException("响应格式异常")
+                }
+            }
+        }
 }

@@ -70,6 +70,7 @@ fun MessageBubble(
     onDelete: () -> Unit,
     onRetry: () -> Unit,
     onEdit: () -> Unit,
+    onQuote: () -> Unit = {},
 ) {
     val isUser = message.role == "user"
     val clipboard = LocalClipboardManager.current
@@ -118,6 +119,7 @@ fun MessageBubble(
                         onCopy = { headerMenu = false; clipboard.setText(AnnotatedString(message.content)); onCopy() },
                         onEdit = { headerMenu = false; onEdit() },
                         onDelete = { headerMenu = false; onDelete() },
+                        onQuote = { headerMenu = false; onQuote() },
                     )
                 }
                 if (!isUser && message.model != null) {
@@ -263,9 +265,11 @@ private fun MessageHeaderMenu(
     onCopy: () -> Unit,
     onEdit: () -> Unit,
     onDelete: () -> Unit,
+    onQuote: () -> Unit = {},
 ) {
     androidx.compose.material3.DropdownMenu(expanded = expanded, onDismissRequest = onDismiss) {
         DropdownMenuItem(text = { Text("复制", fontSize = 14.sp) }, onClick = onCopy)
+        DropdownMenuItem(text = { Text("引用回复", fontSize = 14.sp) }, onClick = onQuote)
         if (showEdit) DropdownMenuItem(text = { Text("编辑", fontSize = 14.sp) }, onClick = onEdit)
         DropdownMenuItem(text = { Text("删除", fontSize = 14.sp, color = Err) }, onClick = onDelete)
     }

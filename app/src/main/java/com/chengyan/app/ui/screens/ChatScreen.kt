@@ -396,7 +396,8 @@ private fun ChatArea(vm: ChatViewModel, modifier: Modifier = Modifier, onEdit: (
                     message = m,
                     // ZorvAI showActions 门控：只在最后一条 AI 消息且本轮已结束时平铺操作行
                     showActions = i == lastAiIdx && !vm.streaming,
-                    onCopy = { clipboard.setText(AnnotatedString(m.content)) },
+                    onCopy = { clipboard.setText(AnnotatedString(m.content)); vm.showToast("已复制到剪贴板") },
+                    onQuote = { vm.quoteReply(m) },
                     onRegenerate = { vm.regenerate(m) },
                     onDelete = { vm.deleteMessage(m) },
                     onRetry = { vm.regenerate(m) },
@@ -472,6 +473,14 @@ private fun WelcomeView(config: com.chengyan.app.data.ModelConfig, onSend: (Stri
 @Composable
 private fun ComposerBar(vm: ChatViewModel) {
     var text by remember { mutableStateOf("") }
+    // 引用回复预填：长按消息 → 引用回复 → 输入框填入引用块
+    val prefill by vm.composerPrefill.collectAsState()
+    LaunchedEffect(prefill) {
+        prefill?.let {
+            text = it
+            vm.composerPrefill.value = null
+        }
+    }
     var pendingImages by remember { mutableStateOf<List<String>>(emptyList()) }
     val context = androidx.compose.ui.platform.LocalContext.current
     val pickImage = androidx.activity.compose.rememberLauncherForActivityResult(
