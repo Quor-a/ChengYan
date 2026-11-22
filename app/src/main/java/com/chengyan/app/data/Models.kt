@@ -9,9 +9,15 @@ data class ModelConfig(
     val model: String = "",
     val sysPrompt: String = "",
     val temperature: Float = 0.7f,
-    val thinking: String = "default"   // off | default | low | high
+    val thinking: String = "default",   // off | default | low | high
+    // ---- 移植自 ZorvAI QuroModelConfig 的生成控制 ----
+    val providerType: String = "OPENAI_GENERIC",  // ApiProviderType 枚举名
+    val maxTokens: Int = 65536,                    // 输出 token 上限
+    val enableTools: Boolean = true,               // 工具调用总开关
+    val contextWindow: Int = 131072                // 上下文预算（估算 token），历史超限时从最旧裁剪，保留 system
 ) {
     val configured: Boolean get() = url.isNotBlank() && key.isNotBlank() && model.isNotBlank()
+    val provider: ApiProviderType get() = runCatching { ApiProviderType.valueOf(providerType) }.getOrDefault(ApiProviderType.OPENAI_GENERIC)
 }
 
 /** 一次工具调用（用于 UI 展示与持久化）。 */
@@ -23,14 +29,18 @@ data class ToolCallInfo(
     var result: String = ""
 )
 
-/** 多套供应商档案，可保存并一键切换。 */
+/** 多套供应商档案 —— 数据结构对齐 ZorvAI QuroSavedProfile / QuroProviderConfig（含健康状态与优先级）。 */
 @Serializable
 data class ApiProfile(
     val id: Long,
     val name: String,
+    val providerType: String = "OPENAI_GENERIC",
     val url: String,
     val key: String,
-    val model: String
+    val model: String,
+    val priority: Int = 0,              // 数值越小优先级越高（故障转移顺序）
+    val health: String = "UNKNOWN",     // UNKNOWN | HEALTHY | FAILED
+    val consecutiveFailures: Int = 0
 )
 
 /** 助手/角色预设。 */

@@ -67,8 +67,10 @@ class OpenAiClient {
                 "low" -> put("reasoning_effort", "low")
                 "high" -> put("reasoning_effort", "high")
             }
-            // 内置工具定义
-            put("tools", Tools.definitionsJson())
+            // 内置工具定义（可在设置中关闭 —— 对齐 ZorvAI QuroModelConfig.enableTools）
+            if (config.enableTools) put("tools", Tools.definitionsJson())
+            // 输出 token 上限（>0 时下发，本地/部分兼容端点可设为 0 关闭）
+            if (config.maxTokens > 0) put("max_tokens", config.maxTokens)
             put("messages", turnsJson(history))
         }.toString().toRequestBody("application/json".toMediaType())
 
@@ -177,23 +179,55 @@ class OpenAiClient {
             }
         }
 
-    /** 获取服务端可用模型列表（GET /models）。 */
-    suspend fun listModels(config: ModelConfig): Result<List<String>> =
+    /** 模型信息 —— 移植自 ZorvAI QuroModelInfo：id + 服务端返回的真实上下文长度（0=未知）。 */
+    data class ModelInfo(val id: String, val contextLength: Int = 0)
+
+    /**
+     * 获取服务端可用模型列表 —— 移植自 ZorvAI QuroModelListFetcher：
+     * OpenAI 兼容端点用 GET /models；Ollama 自动回退 /api/tags；本地回环无 key 时不带鉴权头。
+     */
+    suspend fun listModels(config: ModelConfig): Result<List<ModelInfo>> =
         kotlinx.coroutines.withContext(Dispatchers.IO) {
             runCatching {
-                val request = Request.Builder()
-                    .url(config.url.trimEnd('/') + "/models")
-                    .header("Authorization", "Bearer ${config.key}")
-                    .get().build()
-                client.newCall(request).execute().use { resp ->
-                    if (!resp.isSuccessful) throw IllegalStateException("HTTP ${resp.code}")
-                    val body = resp.body?.string() ?: throw IllegalStateException("空响应")
-                    val obj = json.parseToJsonElement(body) as kotlinx.serialization.json.JsonObject
+                val base = config.url.trim().trimEnd('/')
+                val likelyOllama = base.lowercase().contains(":11434") || base.lowercase().contains("ollama")
+                val url = if (likelyOllama) "$base/api/tags" else "$base/models"
+
+                fun req(u: String): Request {
+                    val b = Request.Builder().url(u).header("Content-Type", "application/json")
+                    if (config.key.isNotBlank()) b.header("Authorization", "Bearer ${config.key}")
+                    return b.get().build()
+                }
+                val resp = client.newCall(req(url)).execute()
+                var text = resp.body?.string().orEmpty()
+                if (!resp.isSuccessful && !likelyOllama && base.contains("localhost") || !resp.isSuccessful && base.contains("127.0.0.1")) {
+                    // 回环地址回退 Ollama 格式
+                    client.newCall(req("$base/api/tags")).execute().use { r2 ->
+                        if (r2.isSuccessful) text = r2.body?.string().orEmpty() else throw IllegalStateException("HTTP ${resp.code}: ${text.take(200)}")
+                    }
+                } else if (!resp.isSuccessful) {
+                    throw IllegalStateException("HTTP ${resp.code}: ${text.take(200)}")
+                }
+
+                if (text.contains("\"models\"") && !text.contains("\"object\":\"list\"")) {
+                    // Ollama /api/tags：{"models":[{"name":"..","...}]}
+                    val obj = json.parseToJsonElement(text) as kotlinx.serialization.json.JsonObject
+                    val arr = obj["models"] as? kotlinx.serialization.json.JsonArray ?: emptyList()
+                    arr.mapNotNull { el ->
+                        val o = el as? kotlinx.serialization.json.JsonObject ?: return@mapNotNull null
+                        val id = (o["name"] as? kotlinx.serialization.json.JsonPrimitive)?.content ?: return@mapNotNull null
+                        ModelInfo(id, (o["context_length"] as? kotlinx.serialization.json.JsonPrimitive)?.content?.toIntOrNull() ?: 0)
+                    }.sortedBy { it.id }
+                } else {
+                    val obj = json.parseToJsonElement(text) as kotlinx.serialization.json.JsonObject
                     val arr = obj["data"] as? kotlinx.serialization.json.JsonArray ?: emptyList<kotlinx.serialization.json.JsonElement>()
                     arr.mapNotNull { el ->
-                        (el as? kotlinx.serialization.json.JsonObject)?.get("id")
-                            ?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content }
-                    }.sorted()
+                        val o = el as? kotlinx.serialization.json.JsonObject ?: return@mapNotNull null
+                        val id = (o["id"] as? kotlinx.serialization.json.JsonPrimitive)?.content ?: return@mapNotNull null
+                        // OpenRouter 等会在模型对象上带 context_length
+                        val ctx = (o["context_length"] as? kotlinx.serialization.json.JsonPrimitive)?.content?.toIntOrNull() ?: 0
+                        ModelInfo(id, ctx)
+                    }.sortedBy { it.id }
                 }
             }
         }

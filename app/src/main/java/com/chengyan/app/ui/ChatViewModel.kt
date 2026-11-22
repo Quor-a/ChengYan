@@ -10,6 +10,7 @@ import com.chengyan.app.data.AssistantPreset
 import com.chengyan.app.data.ChatStore
 import com.chengyan.app.data.Conversation
 import com.chengyan.app.data.Message
+import com.chengyan.app.data.ApiProviderType
 import com.chengyan.app.data.ModelConfig
 import com.chengyan.app.data.SettingsStore
 import com.chengyan.app.net.OpenAiClient
@@ -64,7 +65,12 @@ class ChatViewModel(
 
     /* ---------- 供应商档案 ---------- */
     fun saveProfile(name: String) {
-        val p = ApiProfile(System.currentTimeMillis(), name, config.url, config.key, config.model)
+        val p = ApiProfile(
+            System.currentTimeMillis(), name,
+            providerType = ApiProviderType.detectFromUrl(config.url).name,
+            url = config.url, key = config.key, model = config.model,
+            priority = profiles.size
+        )
         profiles = profiles.filterNot { it.name == name } + p
         viewModelScope.launch { settings.saveProfiles(profiles) }
         _toast.value = "已保存档案「$name」"
@@ -76,9 +82,33 @@ class ChatViewModel(
     }
 
     fun applyProfile(p: ApiProfile) {
-        saveConfig(ModelConfig(url = p.url, key = p.key, model = p.model, sysPrompt = config.sysPrompt, temperature = config.temperature))
+        saveConfig(ModelConfig(
+            url = p.url, key = p.key, model = p.model,
+            sysPrompt = config.sysPrompt, temperature = config.temperature,
+            thinking = config.thinking, providerType = p.providerType,
+            maxTokens = config.maxTokens, enableTools = config.enableTools,
+            contextWindow = config.contextWindow
+        ))
         _toast.value = "已切换到「${p.name}」"
     }
+
+    /** 健康记录：成功/失败后更新对应档案（移植自 ZorvAI QuroMultiProviderRepository 健康检查）。 */
+    private fun markProfile(url: String, ok: Boolean) {
+        var changed = false
+        profiles = profiles.map { p ->
+            if (p.url == url) {
+                changed = true
+                if (ok) p.copy(health = "HEALTHY", consecutiveFailures = 0)
+                else p.copy(health = "FAILED", consecutiveFailures = p.consecutiveFailures + 1)
+            } else p
+        }
+        if (changed) viewModelScope.launch { settings.saveProfiles(profiles) }
+    }
+
+    /** 故障转移候选：按优先级找下一个健康档案（FAST_FAIL 策略，移植自 ZorvAI FailoverConfig）。 */
+    private fun failoverCandidate(failedUrl: String): ApiProfile? =
+        profiles.filter { it.url != failedUrl && it.key.isNotBlank() && it.model.isNotBlank() }
+            .sortedBy { it.priority }.firstOrNull { it.health != "FAILED" || it.consecutiveFailures < 3 }
 
     /* ---------- 助手 ---------- */
     fun startWithAssistant(a: AssistantPreset?) {
@@ -225,10 +255,23 @@ class ChatViewModel(
         }
         // 图片只保留最近两轮，避免上下文爆炸
         val cutoff = turns.size - 2
-        return turns.mapIndexed { i, t -> if (i < cutoff) t.copy(images = emptyList()) else t }
+        val trimmed = turns.mapIndexed { i, t -> if (i < cutoff) t.copy(images = emptyList()) else t }
+        // 上下文预算裁剪（移植自 ZorvAI 上下文压缩思路）：估算 token 超过 contextWindow 时从最旧的消息裁起，system 保留
+        fun estimate(t: OpenAiClient.ChatTurn): Int = t.text.length / 2 + t.images.size * 800
+        var budget = (config.contextWindow * 0.85).toInt()
+        var used = trimmed.sumOf { estimate(it) }
+        var start = 0
+        while (used > budget && start < trimmed.size - 1 && trimmed[start].role != "user") {
+            used -= estimate(trimmed[start]); start++
+        }
+        if (used > budget && start < trimmed.size - 1 && trimmed[start].role == "user") {
+            // 最旧一条是 user 也裁（保留最后一条 user）
+            used -= estimate(trimmed[start]); start++
+        }
+        return trimmed.drop(start)
     }
 
-    private fun request(c: Conversation, history: List<OpenAiClient.ChatTurn>) {
+    private fun request(c: Conversation, history: List<OpenAiClient.ChatTurn>, allowFailover: Boolean = true) {
         val now = System.currentTimeMillis()
         val ai = Message(now, "assistant", "", now, model = config.model, streaming = true)
         c.messages.add(ai)
@@ -271,6 +314,7 @@ class ChatViewModel(
                             is OpenAiClient.StreamEvent.Failure -> {
                                 ai.isError = true
                                 ai.content = if (ai.content.isBlank()) "请求失败：${ev.message}" else ai.content
+                                markProfile(config.url, ok = false)
                             }
                             OpenAiClient.StreamEvent.Done -> {}
                         }
@@ -306,6 +350,25 @@ class ChatViewModel(
                 c.updated = System.currentTimeMillis()
                 persist()
                 current = null; current = c
+                // 自动故障转移：本次失败且未产出内容 → 切到下一个健康档案并重试一次
+                if (allowFailover && ai.isError && ai.content.startsWith("请求失败") && ai.toolCalls.isEmpty()) {
+                    val candidate = failoverCandidate(config.url)
+                    if (candidate != null) {
+                        c.messages.remove(ai)
+                        val prev = config
+                        saveConfig(ModelConfig(
+                            url = candidate.url, key = candidate.key, model = candidate.model,
+                            sysPrompt = prev.sysPrompt, temperature = prev.temperature,
+                            thinking = prev.thinking, providerType = candidate.providerType,
+                            maxTokens = prev.maxTokens, enableTools = prev.enableTools,
+                            contextWindow = prev.contextWindow
+                        ))
+                        _toast.value = "「${prev.model}」请求失败，已自动切换到「${candidate.name}」重试"
+                        request(c, history, allowFailover = false)
+                    }
+                } else if (!ai.isError && ai.content.isNotBlank()) {
+                    markProfile(config.url, ok = true)
+                }
             }
         }
     }

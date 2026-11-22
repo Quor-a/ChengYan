@@ -1,4 +1,4 @@
-@file:OptIn(ExperimentalMaterial3Api::class)
+@file:OptIn(ExperimentalMaterial3Api::class, androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 
 package com.chengyan.app.ui.screens
 
@@ -18,7 +18,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.chengyan.app.data.ApiProviderType
 import com.chengyan.app.data.ModelConfig
+import com.chengyan.app.data.PROVIDER_REGISTRY
+import com.chengyan.app.data.registryOf
 import com.chengyan.app.data.PRESETS
 import com.chengyan.app.net.OpenAiClient
 import com.chengyan.app.ui.theme.*
@@ -42,9 +45,13 @@ fun SettingsScreen(
     var testResult by remember { mutableStateOf<Pair<Boolean, String>?>(null) }
     var testing by remember { mutableStateOf(false) }
     var modelsOpen by remember { mutableStateOf(false) }
-    var modelList by remember { mutableStateOf<List<String>>(emptyList()) }
+    var modelList by remember { mutableStateOf<List<OpenAiClient.ModelInfo>>(emptyList()) }
     var modelFilter by remember { mutableStateOf("") }
     var fetchingModels by remember { mutableStateOf(false) }
+    var maxTokens by remember { mutableStateOf(config.maxTokens.toString()) }
+    var contextWindow by remember { mutableStateOf(config.contextWindow.toString()) }
+    var enableTools by remember { mutableStateOf(config.enableTools) }
+    var providerType by remember { mutableStateOf(config.providerType) }
     val scope = rememberCoroutineScope()
     val context = androidx.compose.ui.platform.LocalContext.current
     val importLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
@@ -76,25 +83,25 @@ fun SettingsScreen(
         ) {
             Text("兼容 OpenAI 接口格式 · 配置仅保存在本机", style = MaterialTheme.typography.bodySmall, color = Ink3, modifier = Modifier.padding(bottom = 16.dp))
 
-            Text("常用服务商", style = MaterialTheme.typography.labelMedium, color = Ink2, modifier = Modifier.padding(bottom = 8.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-                PRESETS.take(3).forEach { p ->
-                    PresetChip(p.name, url == p.url && model == p.model) {
-                        url = p.url; model = p.model; testResult = null
-                    }
-                }
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(7.dp), modifier = Modifier.padding(top = 7.dp)) {
-                PRESETS.drop(3).forEach { p ->
-                    PresetChip(p.name, url == p.url && model == p.model) {
-                        url = p.url; model = p.model; testResult = null
+            Text("服务商（点击自动填入端点与默认模型）", style = MaterialTheme.typography.labelMedium, color = Ink2, modifier = Modifier.padding(bottom = 8.dp))
+            val registry = PROVIDER_REGISTRY.filter { it.endpoint.isNotBlank() }
+            androidx.compose.foundation.layout.FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(7.dp),
+                verticalArrangement = Arrangement.spacedBy(7.dp)
+            ) {
+                registry.forEach { pc ->
+                    PresetChip(pc.type.label, providerType == pc.type.name && url == pc.endpoint) {
+                        providerType = pc.type.name
+                        url = pc.endpoint
+                        if (pc.defaultModel.isNotBlank()) model = pc.defaultModel
+                        testResult = null
                     }
                 }
             }
             Spacer(Modifier.height(18.dp))
 
-            Field("接口地址 Base URL", url, { url = it }, "https://api.deepseek.com/v1")
-            Text("通常以 /v1 结尾，不带尾斜杠", style = MaterialTheme.typography.labelSmall, color = Ink4, modifier = Modifier.padding(start = 4.dp, bottom = 12.dp))
+            Field("接口地址 Base URL", url, { url = it; providerType = ApiProviderType.detectFromUrl(it).name; testResult = null }, "https://api.deepseek.com/v1")
+            Text("已识别：${registryOf(runCatching { ApiProviderType.valueOf(providerType) }.getOrDefault(ApiProviderType.OTHER)).type.label} · 通常以 /v1 结尾，不带尾斜杠", style = MaterialTheme.typography.labelSmall, color = Ink4, modifier = Modifier.padding(start = 4.dp, bottom = 12.dp))
 
             Field("API Key", key, { key = it; testResult = null }, "sk-…",
                 visualTransformation = if (keyVisible) androidx.compose.ui.text.input.VisualTransformation.None
@@ -166,12 +173,19 @@ fun SettingsScreen(
                     colors = ButtonDefaults.buttonColors(containerColor = Accent)
                 ) { Text("保存当前") }
             }
-            vm.profiles.forEach { p ->
+            vm.profiles.sortedBy { it.priority }.forEach { p ->
                 Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(top = 4.dp)) {
+                    // 健康状态点（移植自 ZorvAI HealthStatus）
+                    val dot = when (p.health) { "HEALTHY" -> Ok; "FAILED" -> Err; else -> Ink4 }
+                    androidx.compose.foundation.layout.Box(
+                        Modifier.padding(end = 8.dp).size(8.dp).background(dot, RoundedCornerShape(50))
+                    )
                     Column(Modifier.weight(1f).clickable { vm.applyProfile(p) }) {
-                        Text(p.name, style = MaterialTheme.typography.bodySmall,
+                        Text("${p.name} · ${registryOf(runCatching { ApiProviderType.valueOf(p.providerType) }.getOrDefault(ApiProviderType.OTHER)).type.label}",
+                            style = MaterialTheme.typography.bodySmall,
                             color = if (p.url == config.url && p.model == config.model) AccentInk else Ink)
-                        Text("${p.model} · ${p.url.removePrefix("https://").removePrefix("http://").take(30)}",
+                        Text("${p.model} · ${p.url.removePrefix("https://").removePrefix("http://").take(30)}" +
+                                if (p.health == "FAILED") " · 连接异常" else "",
                             style = MaterialTheme.typography.labelSmall, color = Ink3)
                     }
                     TextButton(onClick = { vm.deleteProfile(p.id) }) {
@@ -216,6 +230,32 @@ fun SettingsScreen(
                     PresetChip(label, thinking == value) { thinking = value }
                 }
             }
+            Spacer(Modifier.height(16.dp))
+
+            Text("生成参数", style = MaterialTheme.typography.labelMedium, color = Ink2, modifier = Modifier.padding(bottom = 6.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                OutlinedTextField(
+                    value = maxTokens, onValueChange = { maxTokens = it.filter { ch -> ch.isDigit() } },
+                    label = { Text("输出上限 tokens", style = MaterialTheme.typography.labelSmall) },
+                    modifier = Modifier.weight(1f), textStyle = MaterialTheme.typography.bodySmall,
+                    shape = RoundedCornerShape(10.dp), singleLine = true, colors = fieldColors()
+                )
+                OutlinedTextField(
+                    value = contextWindow, onValueChange = { contextWindow = it.filter { ch -> ch.isDigit() } },
+                    label = { Text("上下文预算 tokens", style = MaterialTheme.typography.labelSmall) },
+                    modifier = Modifier.weight(1f), textStyle = MaterialTheme.typography.bodySmall,
+                    shape = RoundedCornerShape(10.dp), singleLine = true, colors = fieldColors()
+                )
+            }
+            Text(
+                "上下文超预算时自动从最旧的消息裁剪（保留系统提示词与最新对话）· 输出上限设 0 表示不下发该参数",
+                style = MaterialTheme.typography.labelSmall, color = Ink4, lineHeight = 17.sp,
+                modifier = Modifier.padding(start = 4.dp, top = 4.dp)
+            )
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 6.dp)) {
+                Text("工具调用（时间 / 计算器 / 随机数）", style = MaterialTheme.typography.labelMedium, color = Ink2, modifier = Modifier.weight(1f))
+                Switch(checked = enableTools, onCheckedChange = { enableTools = it }, colors = SwitchDefaults.colors(checkedTrackColor = Accent))
+            }
             Spacer(Modifier.height(6.dp))
 
             testResult?.let { (ok, msg) ->
@@ -250,7 +290,14 @@ fun SettingsScreen(
                 Spacer(Modifier.weight(1f))
                 Button(
                     onClick = {
-                        onSave(ModelConfig(url.trim().trimEnd('/'), key.trim(), model.trim(), sys.trim(), temp, thinking))
+                        onSave(ModelConfig(
+                            url = url.trim().trimEnd('/'), key = key.trim(), model = model.trim(),
+                            sysPrompt = sys.trim(), temperature = temp, thinking = thinking,
+                            providerType = providerType,
+                            maxTokens = maxTokens.toIntOrNull()?.coerceIn(0, 1_000_000) ?: 65536,
+                            enableTools = enableTools,
+                            contextWindow = contextWindow.toIntOrNull()?.coerceAtLeast(4096) ?: 131072
+                        ))
                         onBack()
                     },
                     enabled = url.isNotBlank() && model.isNotBlank(),
@@ -276,22 +323,34 @@ fun SettingsScreen(
                         shape = RoundedCornerShape(10.dp)
                     )
                     Spacer(Modifier.height(8.dp))
-                    val shown = modelList.filter { it.contains(modelFilter, ignoreCase = true) }.take(200)
+                    val shown = modelList.filter { it.id.contains(modelFilter, ignoreCase = true) }.take(200)
                     if (shown.isEmpty()) {
                         Text("无匹配模型", style = MaterialTheme.typography.bodySmall, color = Ink3,
                             modifier = Modifier.padding(vertical = 12.dp))
                     }
                     Column(Modifier.heightIn(max = 320.dp).verticalScroll(rememberScrollState())) {
-                        shown.forEach { name ->
-                            Text(
-                                name,
-                                style = MaterialTheme.typography.bodySmall,
-                                fontFamily = FontFamily.Monospace,
-                                color = if (name == model) AccentInk else Ink,
+                        shown.forEach { mi ->
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
                                 modifier = Modifier.fillMaxWidth()
-                                    .clickable { model = name; modelsOpen = false }
+                                    .clickable { model = mi.id; modelsOpen = false }
                                     .padding(horizontal = 6.dp, vertical = 9.dp)
-                            )
+                            ) {
+                                Text(
+                                    mi.id,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontFamily = FontFamily.Monospace,
+                                    color = if (mi.id == model) AccentInk else Ink,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                if (mi.contextLength > 0) {
+                                    Text(
+                                        "${mi.contextLength / 1000}k",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = Ink4, fontFamily = FontFamily.Monospace
+                                    )
+                                }
+                            }
                         }
                     }
                 }
