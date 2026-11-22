@@ -71,6 +71,13 @@ fun MessageBubble(
     onRetry: () -> Unit,
     onEdit: () -> Unit,
     onQuote: () -> Unit = {},
+    // 身份：AI = 当前灵魂角色（头像/名字跟随灵魂注入），用户 = 设置里的用户资料
+    soulName: String = "",
+    soulAvatarUri: String = "",
+    userName: String = "",
+    userAvatarUri: String = "",
+    onEditSoul: () -> Unit = {},
+    onEditUser: () -> Unit = {},
 ) {
     val isUser = message.role == "user"
     val clipboard = LocalClipboardManager.current
@@ -90,7 +97,9 @@ fun MessageBubble(
 
     Box(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
         // 🔴 头像：悬浮左上角，不是流式兄弟节点（两侧统一靠左，ZorvAI 同款）
-        Box(Modifier.align(Alignment.TopStart)) { if (!isUser) AiAvatar() else UserAvatar() }
+        Box(Modifier.align(Alignment.TopStart)) {
+            if (!isUser) AiAvatar(soulName, soulAvatarUri, onEditSoul) else UserAvatar(userName, userAvatarUri, onEditUser)
+        }
 
         Column(Modifier.fillMaxWidth()) {
             // ── 名字行：作者 · 模型 · 时间（长按出菜单）+ 工具胶囊 ──
@@ -101,7 +110,7 @@ fun MessageBubble(
             ) {
                 Box {
                     Text(
-                        "${if (isUser) "你" else "澄言"} · ${timeFmt.format(Date(message.time))}",
+                        "${if (isUser) userName.ifBlank { "你" } else soulName.ifBlank { "澄言" }} · ${timeFmt.format(Date(message.time))}",
                         fontSize = 11.sp,
                         color = if (isUser) Ink3 else Ink2,
                         modifier = Modifier.combinedClickable(
@@ -389,35 +398,58 @@ private fun BubbleActionButton(label: String, tint: Color, onClick: () -> Unit) 
 /* ---------- 头像（澄言原创视觉，布局同 ZorvAI 悬浮位） ---------- */
 
 @Composable
-private fun AiAvatar() {
+private fun AiAvatar(name: String, avatarUri: String, onClick: () -> Unit) {
     Box(
         Modifier.size(28.dp).background(AccentSoft, RoundedCornerShape(9.dp))
-            .border(1.dp, Color(0xFFEBD2B8), RoundedCornerShape(9.dp)),
+            .border(1.dp, Color(0xFFEBD2B8), RoundedCornerShape(9.dp))
+            // 点 AI 头像 = 编辑当前灵魂角色资料
+            .clickable(onClick = onClick),
         contentAlignment = Alignment.Center
     ) {
-        androidx.compose.foundation.Canvas(Modifier.size(16.dp)) {
-            val w = size.width; val h = size.height
-            val path = androidx.compose.ui.graphics.Path().apply {
-                moveTo(w * 0.18f, h * 0.62f)
-                cubicTo(w * 0.45f, h * 0.52f, w * 0.57f, h * 0.38f, w * 0.57f, h * 0.08f)
-                cubicTo(w * 0.57f, h * 0.38f, w * 0.69f, h * 0.52f, w * 0.96f, h * 0.62f)
-                cubicTo(w * 0.69f, h * 0.72f, w * 0.57f, h * 0.86f, w * 0.57f, h * 0.98f)
-                cubicTo(w * 0.57f, h * 0.86f, w * 0.45f, h * 0.72f, w * 0.18f, h * 0.62f)
-                close()
-            }
-            drawPath(path, AccentInk)
-        }
+        AvatarImageOrChar(avatarUri, name.ifBlank { "澄言" })
     }
 }
 
 @Composable
-private fun UserAvatar() {
+private fun UserAvatar(name: String, avatarUri: String, onClick: () -> Unit) {
     Box(
         Modifier.size(28.dp).background(Paper3, RoundedCornerShape(9.dp))
-            .border(1.dp, Line2, RoundedCornerShape(9.dp)),
+            .border(1.dp, Line2, RoundedCornerShape(9.dp))
+            // 点自己的头像 = 编辑用户资料
+            .clickable(onClick = onClick),
         contentAlignment = Alignment.Center
     ) {
-        Text("你", fontSize = 11.sp, color = Ink2)
+        AvatarImageOrChar(avatarUri, name.ifBlank { "你" })
+    }
+}
+
+/** 头像渲染：builtin = 内置小澄 vector；文件路径 = 用户上传图；空 = 首字圆标。 */
+@Composable
+private fun AvatarImageOrChar(avatarUri: String, fallback: String) {
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+    val bmp = remember(avatarUri) {
+        when {
+            avatarUri == "builtin" -> null
+            avatarUri.isBlank() -> null
+            else -> runCatching {
+                android.graphics.BitmapFactory.decodeFile(avatarUri)
+            }.getOrNull()
+        }
+    }
+    when {
+        avatarUri == "builtin" -> Image(
+            painter = androidx.compose.ui.res.painterResource(com.chengyan.app.R.drawable.ic_soul_default),
+            contentDescription = fallback,
+            modifier = Modifier.size(28.dp).clip(RoundedCornerShape(9.dp)),
+            contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+        )
+        bmp != null -> Image(
+            bitmap = bmp.asImageBitmap(),
+            contentDescription = fallback,
+            modifier = Modifier.size(28.dp).clip(RoundedCornerShape(9.dp)),
+            contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+        )
+        else -> Text(fallback.take(1), fontSize = 11.sp, color = Ink2)
     }
 }
 

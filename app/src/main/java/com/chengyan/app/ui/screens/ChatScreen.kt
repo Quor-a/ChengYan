@@ -532,6 +532,11 @@ private fun ChatArea(vm: ChatViewModel, modifier: Modifier = Modifier, onEdit: (
     val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
     val listState = rememberLazyListState()
     val msgs = conv?.messages ?: emptyList()
+    // 当前对话的灵魂角色（决定 AI 头像与名字）；点 AI 头像可编辑其资料
+    val currentSoul = conv?.soulId?.takeIf { it.isNotBlank() }?.let { id -> vm.souls.firstOrNull { it.id == id } }
+        ?: vm.souls.firstOrNull { it.id == com.chengyan.app.data.SoulRepository.BUILTIN_ID }
+    var editSoulOpen by remember { mutableStateOf(false) }
+    var editUserOpen by remember { mutableStateOf(false) }
 
     // 智能滚动：仅当用户位于底部附近才自动跟随
     val autoFollow = remember { mutableStateOf(true) }
@@ -566,6 +571,12 @@ private fun ChatArea(vm: ChatViewModel, modifier: Modifier = Modifier, onEdit: (
                     onDelete = { vm.deleteMessage(m) },
                     onRetry = { vm.regenerate(m) },
                     onEdit = { onEdit(m) },
+                    soulName = currentSoul?.name ?: "",
+                    soulAvatarUri = currentSoul?.avatarUri ?: "builtin",
+                    userName = vm.userProfile.name,
+                    userAvatarUri = vm.userProfile.avatarUri,
+                    onEditSoul = { editSoulOpen = true },
+                    onEditUser = { editUserOpen = true },
                 )
             }
         }
@@ -589,7 +600,24 @@ private fun ChatArea(vm: ChatViewModel, modifier: Modifier = Modifier, onEdit: (
             }
         }
     }
+    // 点 AI 头像 → 编辑当前灵魂角色；点自己的头像 → 编辑用户资料
+    if (editSoulOpen) {
+        SoulEditDialog(
+            initial = currentSoul,
+            onSave = { vm.saveSoul(it); editSoulOpen = false },
+            onDelete = null,
+            onDismiss = { editSoulOpen = false },
+        )
+    }
+    if (editUserOpen) {
+        UserProfileDialog(
+            initial = vm.userProfile,
+            onSave = { vm.updateUserProfile(it) },
+            onDismiss = { editUserOpen = false },
+        )
+    }
 }
+
 
 @Composable
 private fun WelcomeView(config: com.chengyan.app.data.ModelConfig, onSend: (String) -> Unit, modifier: Modifier = Modifier) {

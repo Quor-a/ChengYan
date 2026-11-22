@@ -4,10 +4,13 @@ package com.chengyan.app.ui.screens
 
 /*
  * 对话设置页（澄言自有功能，视觉沿用 ZorvAI QuroSettingsComponents 的编辑排版风组件）：
- * 系统提示词 / 思考强度 / 测试连接 / 备份与恢复。
+ * 用户资料 / 思考强度 / 测试连接 / 备份与恢复。（系统提示词已删：人格统一走灵魂注入）
  * 与「模型配置」（ZorvAI 移植）分离，避免混排。
  */
 
+import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -43,7 +46,6 @@ fun ChatPrefsScreen(
     onBack: () -> Unit,
 ) {
     val cs = MaterialTheme.colorScheme
-    var sys by remember { mutableStateOf(config.sysPrompt) }
     var thinking by remember { mutableStateOf(config.thinking) }
     var testResult by remember { mutableStateOf<Pair<Boolean, String>?>(null) }
     var testing by remember { mutableStateOf(false) }
@@ -86,22 +88,43 @@ fun ChatPrefsScreen(
                 .padding(horizontal = 18.dp, vertical = 8.dp)
         ) {
             // ====== 01 对话 ======
+            // 系统提示词已删除（用户裁定：多余——人格统一走「灵魂注入」）
             ChapterLabel("01", "对话")
-            Text("系统提示词（可选）", fontSize = 12.sp, color = Ink4, modifier = Modifier.padding(bottom = 4.dp))
-            BasicTextField(
-                value = sys, onValueChange = { sys = it },
-                modifier = Modifier.fillMaxWidth().heightIn(min = 70.dp),
-                textStyle = TextStyle(fontSize = 15.sp, color = Ink),
-                decorationBox = { inner ->
-                    Column {
-                        if (sys.isEmpty()) Text("例如：你是一位简洁专业的中文助手。", fontSize = 15.sp, color = Ink4)
-                        inner()
-                        Spacer(Modifier.height(6.dp))
-                        Box(Modifier.fillMaxWidth().height(1.dp).background(Line))
-                    }
+            var showUserProfile by remember { mutableStateOf(false) }
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+                    .clickable { showUserProfile = true }.padding(12.dp)
+            ) {
+                val upBmp = remember(vm.userProfile.avatarUri) {
+                    if (vm.userProfile.avatarUri.isBlank()) null
+                    else runCatching { android.graphics.BitmapFactory.decodeFile(vm.userProfile.avatarUri) }.getOrNull()
                 }
-            )
+                Box(Modifier.size(34.dp).background(AccentSoft, androidx.compose.foundation.shape.CircleShape),
+                    contentAlignment = Alignment.Center) {
+                    if (upBmp != null) {
+                        androidx.compose.foundation.Image(upBmp.asImageBitmap(), "用户头像",
+                            Modifier.size(34.dp).clip(androidx.compose.foundation.shape.CircleShape),
+                            contentScale = androidx.compose.ui.layout.ContentScale.Crop)
+                    } else Text(vm.userProfile.name.ifBlank { "你" }.take(1), fontSize = 14.sp, color = AccentInk)
+                }
+                Spacer(Modifier.width(10.dp))
+                Column(Modifier.weight(1f)) {
+                    Text("用户资料", fontSize = 14.sp, color = Ink, fontWeight = FontWeight.Medium)
+                    Text(vm.userProfile.name.ifBlank { "设置你的名字和头像，对话中全局显示" },
+                        fontSize = 11.sp, color = Ink4, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                Icon(Icons.Filled.ChevronRight, null, Modifier.size(16.dp), tint = Ink4)
+            }
             Spacer(Modifier.height(12.dp))
+            if (showUserProfile) {
+                com.chengyan.app.ui.screens.UserProfileDialog(
+                    initial = vm.userProfile,
+                    onSave = { vm.updateUserProfile(it) },
+                    onDismiss = { showUserProfile = false },
+                )
+            }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("思考强度", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -128,7 +151,7 @@ fun ChatPrefsScreen(
             Box(
                 Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(Accent)
                     .clickable {
-                        onSave(config.copy(sysPrompt = sys.trim(), thinking = thinking))
+                        onSave(config.copy(thinking = thinking))
                         onBack()
                     }
                     .padding(14.dp),

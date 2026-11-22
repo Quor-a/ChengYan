@@ -142,11 +142,20 @@ private fun SoulSmallCard(
 @Composable
 fun SoulAvatar(soul: SoulCard, size: Int) {
     val bmp = remember(soul.avatarUri) {
-        runCatching {
+        if (soul.avatarUri == "builtin") null
+        else runCatching {
             android.graphics.BitmapFactory.decodeFile(soul.avatarUri)
         }.getOrNull()
     }
-    if (bmp != null) {
+    if (soul.avatarUri == "builtin") {
+        // 内置角色「小澄」：原创 vector 小猫头像
+        androidx.compose.foundation.Image(
+            painter = androidx.compose.ui.res.painterResource(com.chengyan.app.R.drawable.ic_soul_default),
+            contentDescription = "小澄",
+            modifier = Modifier.size(size.dp).clip(CircleShape),
+            contentScale = ContentScale.Crop,
+        )
+    } else if (bmp != null) {
         androidx.compose.foundation.Image(
             bitmap = bmp.asImageBitmap(),
             contentDescription = "头像",

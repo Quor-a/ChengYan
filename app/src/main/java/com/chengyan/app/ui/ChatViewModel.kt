@@ -40,6 +40,15 @@ class ChatViewModel(
     var souls by mutableStateOf<List<com.chengyan.app.data.SoulCard>>(emptyList())
         private set
 
+    // ---- 用户资料（设置里维护；用户消息行全局显示）----
+    val userRepo = com.chengyan.app.data.UserProfileRepository(appContext)
+    var userProfile by mutableStateOf(com.chengyan.app.data.UserProfile())
+        private set
+    fun updateUserProfile(p: com.chengyan.app.data.UserProfile) {
+        userProfile = p
+        viewModelScope.launch { userRepo.save(p) }
+    }
+
     /** ZorvAI 风格的活跃模型配置（与下方 ModelConfig 同步）。 */
     var quroConfig by mutableStateOf(com.chengyan.app.core.model.QuroModelConfig())
         private set
@@ -92,6 +101,7 @@ class ChatViewModel(
         viewModelScope.launch { config = settings.config.first() }
         viewModelScope.launch { profiles = settings.profiles.first() }
         viewModelScope.launch { souls = soulRepo.loadAll() }
+        viewModelScope.launch { userProfile = userRepo.load() }
         viewModelScope.launch { phoneAsked = com.chengyan.app.net.PhonePrefs(appContext).asked() }
         // 加载 ZorvAI 配置层并同步到既有 ModelConfig；同时把预设登记进多提供商仓库（故障转移用）
         viewModelScope.launch {
