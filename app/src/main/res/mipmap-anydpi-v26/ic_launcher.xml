@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 澄言原创图标：暖橙底上的墨点"言"形笔触 -->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/accent" />
+    <foreground android:drawable="@drawable/ic_launcher_foreground" />
+</adaptive-icon>

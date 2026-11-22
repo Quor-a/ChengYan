@@ -1,0 +1,6 @@
+<resources>
+    <!-- 澄言原创配色：暖纸 × 墨色 × 陶土橙 -->
+    <color name="paper">#F7F3EA</color>
+    <color name="ink">#26221C</color>
+    <color name="accent">#B25A29</color>
+</resources>
