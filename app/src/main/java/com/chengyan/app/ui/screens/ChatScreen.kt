@@ -7,6 +7,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -27,6 +28,7 @@ import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.AddPhotoAlternate
+import androidx.compose.material.icons.rounded.AttachFile
 import androidx.compose.material.icons.rounded.Menu
 import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.Tune
@@ -558,8 +560,9 @@ private fun ChatArea(vm: ChatViewModel, modifier: Modifier = Modifier, onEdit: (
     val listState = rememberLazyListState()
     val msgs = conv?.messages ?: emptyList()
     // 当前对话的灵魂角色（决定 AI 头像与名字）；点 AI 头像可编辑其资料
+    // 显示 = 绝对跟随对话绑定的灵魂（prompt 同源，见 historyUpTo）；未绑定时跟随全局激活灵魂
     val currentSoul = conv?.soulId?.takeIf { it.isNotBlank() }?.let { id -> vm.souls.firstOrNull { it.id == id } }
-        ?: vm.souls.firstOrNull { it.id == com.chengyan.app.data.SoulRepository.BUILTIN_ID }
+        ?: vm.activeSoulId.takeIf { it.isNotBlank() }?.let { id -> vm.souls.firstOrNull { it.id == id } }
     var editSoulOpen by remember { mutableStateOf(false) }
     var editUserOpen by remember { mutableStateOf(false) }
 
@@ -699,6 +702,8 @@ private fun ComposerBar(vm: ChatViewModel) {
         }
     }
     var pendingImages by remember { mutableStateOf<List<String>>(emptyList()) }
+    // 🔴 任意文件上传（不限类型）：文本内容内联进消息；图片走视觉 base64；二进制附名称+大小说明
+    var pendingFiles by remember { mutableStateOf<List<String>>(emptyList()) }
     val context = androidx.compose.ui.platform.LocalContext.current
     val pickImage = androidx.activity.compose.rememberLauncherForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia()
@@ -707,6 +712,40 @@ private fun ComposerBar(vm: ChatViewModel) {
             runCatching {
                 val b64 = readImageAsBase64(context, uri)
                 if (b64 != null && pendingImages.size < 4) pendingImages = pendingImages + b64
+            }
+        }   }
+    val pickFile = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.GetContent()
+    ) { uri ->
+        if (uri != null) {
+            runCatching {
+                val resolver = context.contentResolver
+                val name = runCatching {
+                    resolver.query(uri, null, null, null, null)?.use { c ->
+                        val idx = c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                        c.moveToFirst(); if (idx >= 0) c.getString(idx) else null
+                    }
+                }.getOrNull() ?: "file"
+                val mime = resolver.getType(uri) ?: ""
+                if (mime.startsWith("image/")) {
+                    val b64 = readImageAsBase64(context, uri)
+                    if (b64 != null && pendingImages.size < 4) pendingImages = pendingImages + b64
+                } else {
+                    val bytes = resolver.openInputStream(uri)?.use { it.readBytes() }
+                    if (bytes != null) {
+                        val maxBytes = 120_000
+                        val truncated = bytes.size > maxBytes
+                        val slice = if (truncated) bytes.copyOfRange(0, maxBytes) else bytes
+                        val txt = slice.toString(Charsets.UTF_8)
+                        val printable = txt.count { it.isLetterOrDigit() || it.isWhitespace() || ".,:;!?()[]{}<>=+-*/|~'@#$%^&_".contains(it) }.toFloat() / txt.length.coerceAtLeast(1)
+                        pendingFiles = pendingFiles + if (printable > 0.85f) {
+                            "【附件文件：$name${if (truncated) "（内容过长，已截取前 120KB）" else ""}】\n" +
+                                "```\n" + txt + "\n```"
+                        } else {
+                            "【附件文件：$name（${bytes.size / 1024}KB，二进制文件，无法直接读取内容）】"
+                        }
+                    }
+                }
             }
         }
     }
@@ -738,6 +777,22 @@ private fun ComposerBar(vm: ChatViewModel) {
                             }
                         }
                     }
+                    if (pendingFiles.isNotEmpty()) {
+                        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(bottom = 8.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            pendingFiles.forEachIndexed { i, f ->
+                                Surface(shape = RoundedCornerShape(8.dp), border = androidx.compose.foundation.BorderStroke(1.dp, Line),
+                                    color = Paper3) {
+                                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)) {
+                                        Text("📎 " + f.lineSequence().first().removePrefix("【附件文件：").take(18),
+                                            fontSize = 11.sp, color = Ink2, maxLines = 1)
+                                        Text("×", color = Ink3, fontSize = 12.sp,
+                                            modifier = Modifier.padding(start = 6.dp).clickable { pendingFiles = pendingFiles.filterIndexed { j, _ -> j != i } })
+                                    }
+                                }
+                            }
+                        }
+                    }
                     BasicTextField(
                         value = text, onValueChange = { text = it },
                         textStyle = MaterialTheme.typography.bodyMedium.copy(color = Ink),
@@ -746,8 +801,8 @@ private fun ComposerBar(vm: ChatViewModel) {
                             imeAction = androidx.compose.ui.text.input.ImeAction.Send
                         ),
                         keyboardActions = KeyboardActions(onSend = {
-                            val t = text.trim()
-                            if (t.isNotBlank()) { vm.send(t); text = "" }
+                            val t = (text.trim() + "\n\n" + pendingFiles.joinToString("\n\n")).trim()
+                            if (t.isNotBlank()) { vm.send(t); text = ""; pendingFiles = emptyList() }
                         }),
                         maxLines = 6,
                         decorationBox = { inner ->
@@ -764,6 +819,9 @@ private fun ComposerBar(vm: ChatViewModel) {
                         }) {
                             Icon(Icons.Rounded.AddPhotoAlternate, "添加图片", tint = Ink3)
                         }
+                        IconButton(onClick = { pickFile.launch("*/*") }) {
+                            Icon(Icons.Rounded.AttachFile, "添加文件", tint = Ink3)
+                        }
                         Text("Enter 发送", style = MaterialTheme.typography.labelSmall, color = Ink4)
                         Spacer(Modifier.weight(1f))
                         if (vm.streaming) {
@@ -778,9 +836,10 @@ private fun ComposerBar(vm: ChatViewModel) {
                         } else {
                             IconButton(
                                 onClick = {
-                                    val t = text.trim()
+                                    val t = (text.trim() + "\n\n" + pendingFiles.joinToString("\n\n")).trim()
                                     if (t.isNotBlank() || pendingImages.isNotEmpty()) {
                                         vm.send(t.ifBlank { "请看图回答" }, pendingImages)
+                                        text = ""; pendingFiles = emptyList()
                                         text = ""; pendingImages = emptyList()
                                     }
                                 },

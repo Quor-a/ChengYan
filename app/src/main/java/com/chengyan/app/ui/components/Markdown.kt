@@ -1,5 +1,7 @@
 package com.chengyan.app.ui.components
 
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.ui.Alignment
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -179,15 +181,29 @@ private fun CodeBlock(lang: String, code: String) {
     val clipboard = LocalClipboardManager.current
     val scope = rememberCoroutineScope()
     var copied by remember { mutableStateOf(false) }
+    // 🔴 长代码默认只显示一半（折叠），点开显示全部；html 支持渲染预览
+    var expanded by remember(code) { mutableStateOf(false) }
+    var showPreview by remember(code) { mutableStateOf(true) }
+    val isHtml = lang.equals("html", true) || lang.equals("htm", true)
+    val isLong = code.count { it == '\n' } + 1 > 12
+
     Column(
         Modifier.padding(vertical = 6.dp).background(CodeBg, RoundedCornerShape(12.dp))
     ) {
         Row(
             Modifier.fillMaxWidth().background(CodeHead, RoundedCornerShape(topStart = 12.dp, topEnd = 12.dp))
                 .padding(horizontal = 12.dp, vertical = 6.dp),
-            horizontalArrangement = Arrangement.SpaceBetween
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             Text(lang.uppercase(), fontFamily = FontFamily.Monospace, fontSize = 10.sp, color = Color(0xFF8A8069))
+            Spacer(Modifier.weight(1f))
+            if (isHtml) {
+                Text(
+                    if (showPreview) "源码" else "预览",
+                    fontSize = 11.sp, color = Color(0xFF8A8069),
+                    modifier = Modifier.chip().clickable { showPreview = !showPreview }
+                )
+            }
             Text(
                 if (copied) "已复制" else "复制",
                 fontSize = 11.sp,
@@ -202,15 +218,50 @@ private fun CodeBlock(lang: String, code: String) {
                 }
             )
         }
-        Text(
-            code,
-            fontFamily = FontFamily.Monospace,
-            fontSize = 12.sp,
-            lineHeight = 19.sp,
-            color = CodeFg,
-            modifier = Modifier.horizontalScroll(rememberScrollState()).padding(14.dp)
-        )
+        if (isHtml && showPreview) {
+            HtmlPreview(code)
+        } else {
+            Text(
+                code,
+                fontFamily = FontFamily.Monospace,
+                fontSize = 12.sp,
+                lineHeight = 19.sp,
+                color = CodeFg,
+                modifier = Modifier
+                    .verticalScroll(rememberScrollState())
+                    .heightIn(max = if (expanded || !isLong) 4000.dp else 170.dp)
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(14.dp)
+            )
+        }
+        if (isLong) {
+            Box(Modifier.fillMaxWidth().background(CodeHead, RoundedCornerShape(bottomStart = 12.dp, bottomEnd = 12.dp)).clickable { expanded = !expanded }.padding(vertical = 7.dp),
+                contentAlignment = Alignment.Center) {
+                Text(if (expanded) "收起 ▲" else "展开全部 ▼", fontSize = 11.sp, color = Color(0xFF8A8069))
+            }
+        }
     }
+}
+
+/** HTML 渲染预览：WebView 沙箱加载（data URL，JS 开启以支持页面自带脚本）。 */
+@Composable
+private fun HtmlPreview(code: String) {
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+    androidx.compose.ui.viewinterop.AndroidView(
+        factory = {
+            android.webkit.WebView(it).apply {
+                settings.javaScriptEnabled = true
+                settings.loadWithOverviewMode = true
+                settings.useWideViewPort = true
+                setBackgroundColor(android.graphics.Color.TRANSPARENT)
+            }
+        },
+        update = { wv ->
+            wv.loadDataWithBaseURL(null, code, "text/html", "utf-8", null)
+        },
+        modifier = Modifier.fillMaxWidth().height(300.dp)
+    )
 }
 
 private fun Modifier.chip() = this.then(

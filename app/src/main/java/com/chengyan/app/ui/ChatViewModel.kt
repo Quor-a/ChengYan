@@ -39,6 +39,13 @@ class ChatViewModel(
     val soulRepo = com.chengyan.app.data.SoulRepository(appContext)
     var souls by mutableStateOf<List<com.chengyan.app.data.SoulCard>>(emptyList())
         private set
+    // 🔴 全局激活的灵魂（绝对生效）：新对话一律绑定它；点灵魂卡=激活（ZorvAI setActive 语义）
+    var activeSoulId by mutableStateOf("")
+        private set
+    fun setActiveSoul(card: com.chengyan.app.data.SoulCard?) {
+        activeSoulId = card?.id ?: ""
+        viewModelScope.launch { soulRepo.setActiveId(activeSoulId) }
+    }
 
     // ---- 记忆库 / 全局标签池（ZorvAI QuroMemoryRepository / 标签池语义）----
     val memRepo = com.chengyan.app.data.SoulMemoryRepository(appContext)
@@ -112,7 +119,11 @@ class ChatViewModel(
     init {
         viewModelScope.launch { config = settings.config.first() }
         viewModelScope.launch { profiles = settings.profiles.first() }
-        viewModelScope.launch { souls = soulRepo.loadAll() }
+        viewModelScope.launch {
+            souls = soulRepo.loadAll()
+            activeSoulId = soulRepo.activeId().ifBlank { com.chengyan.app.data.SoulRepository.BUILTIN_ID }
+            if (soulRepo.activeId().isBlank()) soulRepo.setActiveId(activeSoulId)
+        }
         viewModelScope.launch { userProfile = userRepo.load() }
         reloadMemories()
         viewModelScope.launch { phoneAsked = com.chengyan.app.net.PhonePrefs(appContext).asked() }
@@ -296,8 +307,8 @@ class ChatViewModel(
 
     /** 用一张灵魂卡（或 null=不使用）开新对话；对话记住自己的灵魂。 */
     fun startWithSoul(card: com.chengyan.app.data.SoulCard?) {
+        setActiveSoul(card)   // 激活 = 全局默认（ZorvAI：点卡即激活）
         newConversation()
-        current?.soulId = card?.id ?: ""
         if (card != null) current?.title = "新对话 · ${card.name}"
         persist()
     }
@@ -314,7 +325,9 @@ class ChatViewModel(
     /* ---------- 对话 ---------- */
     fun newConversation() {
         val now = System.currentTimeMillis()
-        val c = Conversation(id = com.chengyan.app.data.IdGen.next(), title = "新对话", created = now)
+        // 🔴 新对话绝对绑定当前激活灵魂（点卡激活后，AI 绝对按该角色回答）
+        val c = Conversation(id = com.chengyan.app.data.IdGen.next(), title = "新对话", created = now,
+            soulId = activeSoulId)
         current = c
         conversations = conversations + c
         persist()
