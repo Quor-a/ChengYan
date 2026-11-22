@@ -29,6 +29,7 @@ data class SoulCard(
     val description: String = "",        // 一句话描述（列表卡片副标题）
     val roleSetting: String = "",        // 角色设定（注入为系统提示词主体）
     val chatSetting: String = "",        // 聊天设定（语气/格式等附加约束）
+    val tags: List<String> = emptyList(), // 标签（从全局标签池选择）
     val createdAt: Long = 0,
     val updatedAt: Long = 0,
 ) {

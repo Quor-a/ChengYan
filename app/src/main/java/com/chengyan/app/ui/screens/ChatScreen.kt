@@ -94,6 +94,8 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit, onOpenPrefs: () ->
     var soulEditing by remember { mutableStateOf<com.chengyan.app.data.SoulCard?>(null) }
     var soulEditOpen by remember { mutableStateOf(false) }
     var soulEditIsNew by remember { mutableStateOf(false) }
+    var memoryOpen by remember { mutableStateOf(false) }
+    var tagManageOpen by remember { mutableStateOf(false) }
     val context = androidx.compose.ui.platform.LocalContext.current
 
     // 🔴 ZorvAI 同款结构：ModalNavigationDrawer 包在 Scaffold **外面**——
@@ -317,6 +319,10 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit, onOpenPrefs: () ->
             onDismiss = { soulSheetOpen = false },
             onCreate = { soulSheetOpen = false; soulEditIsNew = true; soulEditing = null; soulEditOpen = true },
             onEdit = { soulSheetOpen = false; soulEditIsNew = false; soulEditing = it; soulEditOpen = true },
+            activeId = vm.current?.soulId?.takeIf { it.isNotBlank() }
+                ?: com.chengyan.app.data.SoulRepository.BUILTIN_ID,
+            onManageMemory = { soulSheetOpen = false; memoryOpen = true },
+            onManageTags = { soulSheetOpen = false; tagManageOpen = true },
             onDelete = { vm.deleteSoul(it.id) },
             onPick = { card -> soulSheetOpen = false; vm.startWithSoul(card) },
         )
@@ -324,11 +330,30 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit, onOpenPrefs: () ->
     if (soulEditOpen) {
         SoulEditDialog(
             initial = soulEditing,
+            tagRepo = vm.tagRepo,
+            memRepo = vm.memRepo,
+            onManageTags = { soulEditOpen = false; tagManageOpen = true },
             onSave = { vm.saveSoul(it) },
             onDelete = if (!soulEditIsNew) {
                 { soulEditOpen = false; soulEditing?.let { vm.deleteSoul(it.id) } }
             } else null,
             onDismiss = { soulEditOpen = false },
+        )
+    }
+    if (memoryOpen) {
+        val activeSoulId = soulEditing?.id
+            ?: vm.current?.soulId?.takeIf { it.isNotBlank() }
+            ?: com.chengyan.app.data.SoulRepository.BUILTIN_ID
+        MemoryDialog(
+            personaId = activeSoulId,
+            repo = vm.memRepo,
+            onDismiss = { memoryOpen = false; vm.reloadMemories() },
+        )
+    }
+    if (tagManageOpen) {
+        TagManageScreen(
+            repo = vm.tagRepo,
+            onDismiss = { tagManageOpen = false },
         )
     }
 

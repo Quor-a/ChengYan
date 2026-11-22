@@ -40,10 +40,22 @@ class ChatViewModel(
     var souls by mutableStateOf<List<com.chengyan.app.data.SoulCard>>(emptyList())
         private set
 
+    // ---- 记忆库 / 全局标签池（ZorvAI QuroMemoryRepository / 标签池语义）----
+    val memRepo = com.chengyan.app.data.SoulMemoryRepository(appContext)
+    val tagRepo = com.chengyan.app.data.TagPoolRepository(appContext)
+
     // ---- 用户资料（设置里维护；用户消息行全局显示）----
     val userRepo = com.chengyan.app.data.UserProfileRepository(appContext)
     var userProfile by mutableStateOf(com.chengyan.app.data.UserProfile())
         private set
+    /** 各灵魂卡的记忆缓存（key=soulId），发送时同步注入。 */
+    var cachedMemories by mutableStateOf<Map<String, List<com.chengyan.app.data.SoulMemory>>>(emptyMap())
+        private set
+    fun reloadMemories() {
+        viewModelScope.launch {
+            cachedMemories = memRepo.loadAll().groupBy { it.personaId }
+        }
+    }
     fun updateUserProfile(p: com.chengyan.app.data.UserProfile) {
         userProfile = p
         viewModelScope.launch { userRepo.save(p) }
@@ -102,6 +114,7 @@ class ChatViewModel(
         viewModelScope.launch { profiles = settings.profiles.first() }
         viewModelScope.launch { souls = soulRepo.loadAll() }
         viewModelScope.launch { userProfile = userRepo.load() }
+        reloadMemories()
         viewModelScope.launch { phoneAsked = com.chengyan.app.net.PhonePrefs(appContext).asked() }
         // 加载 ZorvAI 配置层并同步到既有 ModelConfig；同时把预设登记进多提供商仓库（故障转移用）
         viewModelScope.launch {
@@ -425,7 +438,11 @@ class ChatViewModel(
         val turns = mutableListOf<OpenAiClient.ChatTurn>()
         // 灵魂注入优先级（ZorvAI 语义）：对话绑定的灵魂卡 > 助手预设 > 全局系统提示词 > 默认基线
         val soul = c.soulId.takeIf { it.isNotBlank() }?.let { id -> souls.firstOrNull { it.id == id } }
-        val soulPrompt = soul?.toSystemPrompt()?.takeIf { it.isNotBlank() }
+        val soulPrompt = soul?.toSystemPrompt()?.takeIf { it.isNotBlank() }?.let { base ->
+            // 记忆库注入（ZorvAI 语义）：该角色的长期记忆追加在灵魂提示词之后
+            val memories = cachedMemories[soul?.id ?: ""].orEmpty()
+            if (memories.isEmpty()) base else base + "\n\n" + com.chengyan.app.data.SoulMemoryRepository(appContext).injectBlock(memories)
+        }
         val sys = soulPrompt ?: (assistant?.prompt?.takeIf { it.isNotBlank() } ?: config.sysPrompt)
         // 日期感知默认系统提示（成熟客户端惯例：系统提示注入当天日期；无自定义人设时给基线行为约束）
         val effectiveSys = if (soulPrompt != null) sys else sys.ifBlank {
