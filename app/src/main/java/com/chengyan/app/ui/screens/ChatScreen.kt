@@ -34,6 +34,11 @@ import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.material3.ModalNavigationDrawer
+import androidx.compose.material3.ModalDrawerSheet
+import androidx.compose.material3.rememberDrawerState
+import androidx.compose.material3.DrawerValue
+import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -59,7 +64,10 @@ private val dayFmt = SimpleDateFormat("M月d日", Locale.getDefault())
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit, onOpenPrefs: () -> Unit = {}) {
-    val drawerOpen = remember { mutableStateOf(false) }
+    val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed, confirmStateChange = { true })
+    val scope = rememberCoroutineScope()
+    val openDrawer = { scope.launch { drawerState.open() } }
+    val closeDrawer = { scope.launch { drawerState.close() } }
     val clipboard = LocalClipboardManager.current
     var confirmDelete by remember { mutableStateOf<Long?>(null) }
     var confirmClear by remember { mutableStateOf(false) }
@@ -87,7 +95,7 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit, onOpenPrefs: () ->
                     Column(Modifier.widthIn(max = 200.dp)) {
                         // 单行省略：会话标题可能很长（旧版多行标题把整个顶栏撑乱）
                         Text(
-                            vm.current?.title ?: "新对话",
+                            vm.current?.title?.takeIf { it.isNotBlank() && it != "null" } ?: "新对话",
                             style = MaterialTheme.typography.titleMedium,
                             fontFamily = androidx.compose.ui.text.font.FontFamily.Serif,
                             maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
@@ -100,7 +108,7 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit, onOpenPrefs: () ->
                     }
                 },
                 navigationIcon = {
-                    IconButton(onClick = { drawerOpen.value = true }) {
+                    IconButton(onClick = { openDrawer() }) {
                         Icon(Icons.Rounded.Menu, "对话列表", tint = Ink2)
                     }
                 },
@@ -169,23 +177,28 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit, onOpenPrefs: () ->
             )
         }
     ) { pad ->
-        Box(Modifier.padding(pad).fillMaxSize()) {
-            if (drawerOpen.value) {
-                // 半透明遮罩：点外部关闭（标准抽屉交互）
-                Box(
-                    Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.25f))
-                        .clickable { drawerOpen.value = false }
-                )
-                ConversationDrawer(
-                    conversations = vm.conversations,
-                    currentId = vm.current?.id,
-                    onPick = { vm.pick(it); drawerOpen.value = false },
-                    onDelete = { confirmDelete = it },
-                    onNew = { drawerOpen.value = false; soulSheetOpen = true },
-                    onClose = { drawerOpen.value = false }
-                )
+        // 🔴 标准 ModalNavigationDrawer：层级/遮罩/手势由框架保证，不再手搓浮层
+        ModalNavigationDrawer(
+            drawerState = drawerState,
+            gesturesEnabled = drawerState.isOpen,
+            drawerContent = {
+                ModalDrawerSheet(
+                    drawerContainerColor = Paper2,
+                    drawerTonalElevation = 8.dp,
+                    windowInsets = androidx.compose.foundation.layout.WindowInsets(0, 0, 0, 0),
+                ) {
+                    ConversationDrawer(
+                        conversations = vm.conversations,
+                        currentId = vm.current?.id,
+                        onPick = { vm.pick(it); closeDrawer() },
+                        onDelete = { confirmDelete = it },
+                        onNew = { closeDrawer(); soulSheetOpen = true },
+                        onClose = { closeDrawer() }
+                    )
+                }
             }
-            Column(Modifier.fillMaxSize()) {
+        ) {
+            Column(Modifier.padding(pad).fillMaxSize()) {
                 ChatArea(vm, Modifier.weight(1f), onEdit = { editing = it; editText = it.content })
                 ComposerBar(vm)
             }
@@ -367,12 +380,7 @@ private fun ConversationDrawer(
     onClose: () -> Unit,
 ) {
     var query by remember { mutableStateOf("") }
-    Surface(
-        modifier = Modifier.fillMaxHeight().width(300.dp),
-        shape = RoundedCornerShape(topEnd = 18.dp, bottomEnd = 18.dp),
-        color = Paper2,
-        shadowElevation = 12.dp
-    ) {
+    Surface(color = Paper2) {
         Column(Modifier.fillMaxWidth().padding(horizontal = 14.dp).padding(top = 14.dp, bottom = 12.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
                 Box(
