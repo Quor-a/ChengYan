@@ -12,6 +12,7 @@ import com.chengyan.app.data.SettingsStore
 import com.chengyan.app.ui.ChatViewModel
 import com.chengyan.app.ui.screens.ChatScreen
 import com.chengyan.app.ui.screens.SettingsScreen
+import com.chengyan.app.ui.screens.ChatPrefsScreen
 import com.chengyan.app.ui.theme.ChengYanTheme
 
 class MainActivity : ComponentActivity() {
@@ -23,13 +24,22 @@ class MainActivity : ComponentActivity() {
         setContent {
             ChengYanTheme {
                 var showSettings by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
+                var showPrefs by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
                 val vm: ChatViewModel = viewModel(factory = ChatViewModelFactory(appContext, settings, chats))
-                if (showSettings) {
+                if (showPrefs) {
+                    ChatPrefsScreen(
+                        config = vm.config,
+                        vm = vm,
+                        onSave = { vm.saveConfig(it) },
+                        onBack = { showPrefs = false }
+                    )
+                } else if (showSettings) {
                     SettingsScreen(
                         config = vm.config,
                         vm = vm,
                         onSave = { vm.saveConfig(it) },
-                        onBack = { showSettings = false }
+                        onBack = { showSettings = false },
+                        onOpenPrefs = { showPrefs = true }
                     )
                 } else {
                     ChatScreen(vm, onOpenSettings = { showSettings = true })

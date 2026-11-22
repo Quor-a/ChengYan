@@ -3,7 +3,7 @@
 package com.chengyan.app.ui.screens
 
 /*
- * 模型配置页 —— 界面结构与交互完整移植自 Quor-a/ZorvAI ui/QuroModelConfigScreen.kt（云端模式部分）
+ * 模型配置页 —— 界面结构与交互完整移植自（云端模式；ZorvAI 的「01 导入模型」为本地引擎专区，澄言纯云端故自 02 起编号） Quor-a/ZorvAI ui/QuroModelConfigScreen.kt（云端模式部分）
  * 与 ui/QuroSettingsComponents.kt：
  * - 章节序号排版（ChapterLabel）：陶土色衬线序号 + 衬线标题 + 分隔线
  * - 服务商为「选择器行 + 搜索式弹窗」（ApiProviderDialogWithCustom：内置 33 家 + 自建供应商分组）
@@ -71,16 +71,13 @@ fun SettingsScreen(
     vm: com.chengyan.app.ui.ChatViewModel,
     onSave: (ModelConfig) -> Unit,
     onBack: () -> Unit,
+    onOpenPrefs: () -> Unit = {},
 ) {
     val cs = MaterialTheme.colorScheme
     // 本页直接编辑 ZorvAI 配置（QuroModelConfig），保存时同步到流式客户端
     var cfg by remember { mutableStateOf(vm.quroConfig) }
     fun update(f: (QuroModelConfig) -> QuroModelConfig) { cfg = f(cfg) }
 
-    var sys by remember { mutableStateOf(config.sysPrompt) }
-    var thinking by remember { mutableStateOf(config.thinking) }
-    var testResult by remember { mutableStateOf<Pair<Boolean, String>?>(null) }
-    var testing by remember { mutableStateOf(false) }
     var isFetchingModels by remember { mutableStateOf(false) }
     var modelListResult by remember { mutableStateOf<QuroModelListResult?>(null) }
 
@@ -103,17 +100,6 @@ fun SettingsScreen(
     val providerHealth = remember(vm.quroProfiles) {
         vm.quroMultiProviderRepo.getAllConfigs().associate { it.id to it.healthStatus.name }
     }
-    val importLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
-        androidx.activity.result.contract.ActivityResultContracts.OpenDocument()
-    ) { uri ->
-        if (uri != null) {
-            runCatching {
-                context.contentResolver.openInputStream(uri)?.use {
-                    vm.restoreBackup(it.readBytes().toString(Charsets.UTF_8))
-                }
-            }
-        }
-    }
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -129,7 +115,10 @@ fun SettingsScreen(
                 navigationIcon = {
                     IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, "返回", tint = Ink2) }
                 },
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background)
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background),
+                actions = {
+                    TextButton(onClick = onOpenPrefs) { Text("对话设置", color = AccentInk) }
+                }
             )
         }
     ) { pad ->
@@ -141,7 +130,7 @@ fun SettingsScreen(
                 .padding(horizontal = 18.dp, vertical = 8.dp)
         ) {
             // ====== 01 服务商（SettingsSelectorRow + ApiProviderDialogWithCustom） ======
-            ChapterLabel("01", "服务商")
+            ChapterLabel("02", "服务商")
             SettingsSelectorRow(
                 title = "服务商",
                 subtitle = "内置 33 家预设与自建供应商，点击选择",
@@ -151,7 +140,7 @@ fun SettingsScreen(
             Spacer(Modifier.height(18.dp))
 
             // ====== 02 连接 ======
-            ChapterLabel("02", "连接")
+            ChapterLabel("03", "连接")
             QuroField("Base URL", cfg.baseUrl, KeyboardOptions.Default) { v -> update { c -> c.copy(baseUrl = v) } }
             Spacer(Modifier.height(12.dp))
             ApiKeyField(value = cfg.apiKey) { v -> update { c -> c.copy(apiKey = v) } }
@@ -163,13 +152,13 @@ fun SettingsScreen(
             Spacer(Modifier.height(18.dp))
 
             // ====== 03 参数 ======
-            ChapterLabel("03", "参数")
+            ChapterLabel("04", "参数")
             QuroField("模型名称 Model", cfg.model, KeyboardOptions.Default) { v -> update { c -> c.copy(model = v) } }
             Spacer(Modifier.height(6.dp))
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 TextButton(
                     onClick = {
-                        if (cfg.baseUrl.isBlank()) { testResult = false to "请先填写 Base URL"; return@TextButton }
+                        if (cfg.baseUrl.isBlank()) { return@TextButton }
                         isFetchingModels = true
                         scope.launch {
                             // 先读缓存（QuroModelConfigRepository.loadModelListCache，按 baseUrl 失效）
@@ -258,7 +247,7 @@ fun SettingsScreen(
                 Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(Accent)
                     .clickable {
                         vm.saveQuroConfig(cfg)
-                        onSave(config.copy(url = cfg.baseUrl, key = cfg.apiKey, model = cfg.model, temperature = cfg.temperature, sysPrompt = sys, thinking = thinking))
+                        onSave(config.copy(url = cfg.baseUrl, key = cfg.apiKey, model = cfg.model, temperature = cfg.temperature))
                         onBack()
                     }
                     .padding(14.dp),
@@ -270,7 +259,7 @@ fun SettingsScreen(
 
             // ====== 已保存预设（QuroSavedProfileRepository） ======
             if (profiles.isNotEmpty()) {
-                ChapterLabel("04", "已保存预设", profiles.size.toString())
+                ChapterLabel("05", "已保存预设", profiles.size.toString())
                 profiles.forEach { profile ->
                     Card(Modifier.fillMaxWidth().padding(vertical = 2.dp), colors = CardDefaults.cardColors(containerColor = Paper2)) {
                         Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -304,94 +293,7 @@ fun SettingsScreen(
                 Spacer(Modifier.height(16.dp))
             }
 
-            // ====== 05 对话 ======
-            ChapterLabel("05", "对话")
-            Text("系统提示词（可选）", fontSize = 12.sp, color = Ink4, modifier = Modifier.padding(bottom = 4.dp))
-            BasicTextField(
-                value = sys, onValueChange = { sys = it },
-                modifier = Modifier.fillMaxWidth().heightIn(min = 70.dp),
-                textStyle = TextStyle(fontSize = 15.sp, color = Ink),
-                decorationBox = { inner ->
-                    Column {
-                        if (sys.isEmpty()) Text("例如：你是一位简洁专业的中文助手。", fontSize = 15.sp, color = Ink4)
-                        inner()
-                        Spacer(Modifier.height(6.dp))
-                        Box(Modifier.fillMaxWidth().height(1.dp).background(Line))
-                    }
-                }
-            )
-            Spacer(Modifier.height(12.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("思考强度", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    listOf("off" to "关", "default" to "默认", "low" to "低", "high" to "高").forEach { (v, label) ->
-                        Surface(
-                            shape = CircleShape,
-                            color = if (thinking == v) AccentSoft else MaterialTheme.colorScheme.surfaceVariant,
-                            onClick = { thinking = v }
-                        ) {
-                            Text(label, fontSize = 12.sp, color = if (thinking == v) AccentInk else Ink2,
-                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp))
-                        }
-                    }
-                }
-            }
-            Spacer(Modifier.height(18.dp))
 
-            // ====== 06 备份与恢复 ======
-            ChapterLabel("06", "备份与恢复")
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                OutlinedButton(
-                    onClick = {
-                        val json = vm.backupAll()
-                        val intent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
-                            type = "application/json"
-                            putExtra(android.content.Intent.EXTRA_TEXT, json)
-                            putExtra(android.content.Intent.EXTRA_SUBJECT, "澄言备份")
-                        }
-                        context.startActivity(android.content.Intent.createChooser(intent, "导出备份"))
-                    },
-                    shape = RoundedCornerShape(10.dp),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, Line2),
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Ink2)
-                ) { Text("导出全部对话") }
-                OutlinedButton(
-                    onClick = { importLauncher.launch(arrayOf("application/json", "text/plain", "*/*")) },
-                    shape = RoundedCornerShape(10.dp),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, Line2),
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Ink2)
-                ) { Text("从文件恢复") }
-            }
-            Spacer(Modifier.height(12.dp))
-
-            testResult?.let { (ok, msg) ->
-                InfoBox(msg, tone = if (ok) Ok else Err)
-                Spacer(Modifier.height(12.dp))
-            }
-
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                OutlinedButton(
-                    onClick = {
-                        if (cfg.baseUrl.isBlank() || cfg.model.isBlank()) {
-                            testResult = false to "请先填写正确的接口地址和模型名称"
-                            return@OutlinedButton
-                        }
-                        testing = true; testResult = null
-                        scope.launch {
-                            val client = OpenAiClient()
-                            testResult = client.test(com.chengyan.app.data.ModelConfig(
-                                url = cfg.baseUrl, key = cfg.apiKey, model = cfg.model
-                            )).fold({ true to "✓ $it" }, { false to "✗ ${it.message ?: "连接失败"}" })
-                            testing = false
-                        }
-                    },
-                    enabled = !testing,
-                    shape = RoundedCornerShape(10.dp),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, Line2),
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Ink2)
-                ) { Text(if (testing) "测试中…" else "测试连接") }
-            }
-            Spacer(Modifier.height(24.dp))
         }
     }
 
@@ -410,7 +312,6 @@ fun SettingsScreen(
                     if (defaultEndpoint.isNotEmpty()) c = c.copy(baseUrl = defaultEndpoint)
                     c
                 }
-                testResult = null
                 showProviderDialog = false
             },
             onCustomSelected = { cp ->
@@ -418,7 +319,6 @@ fun SettingsScreen(
                     it.copy(provider = "OTHER", baseUrl = cp.baseUrl, customProviderName = cp.name,
                         model = if (cp.defaultModel.isNotBlank()) cp.defaultModel else it.model)
                 }
-                testResult = null
                 showProviderDialog = false
             },
             onCustomSaved = { name, url, model ->
