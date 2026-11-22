@@ -1,6 +1,13 @@
 package com.chengyan.app.data
 
 import kotlinx.serialization.Serializable
+import java.util.concurrent.atomic.AtomicLong
+
+/** 唯一 id 生成器：时间戳*1000 + 进程内递增序号，杜绝同一毫秒创建两条数据时 id 撞车（LazyColumn key 冲突闪退）。 */
+object IdGen {
+    private val seq = AtomicLong(0)
+    fun next(): Long = System.currentTimeMillis() * 1000 + (seq.incrementAndGet() % 1000)
+}
 
 @Serializable
 data class ModelConfig(

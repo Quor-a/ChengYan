@@ -236,7 +236,7 @@ class ChatViewModel(
     /* ---------- 对话 ---------- */
     fun newConversation() {
         val now = System.currentTimeMillis()
-        current = Conversation(id = now, title = "新对话", created = now)
+        current = Conversation(id = com.chengyan.app.data.IdGen.next(), title = "新对话", created = now)
         persist()
     }
 
@@ -277,7 +277,7 @@ class ChatViewModel(
         val c = current ?: run { newConversation(); current!! }
         val now = System.currentTimeMillis()
         if (c.messages.isEmpty()) c.title = text.take(18)
-        c.messages.add(Message(now, "user", text, now, images = images))
+        c.messages.add(Message(com.chengyan.app.data.IdGen.next(), "user", text, now, images = images))
         c.updated = now
         request(c, historyUpTo(c, c.messages.lastIndex))
     }
@@ -388,7 +388,7 @@ class ChatViewModel(
 
     private fun request(c: Conversation, history: List<OpenAiClient.ChatTurn>, allowFailover: Boolean = true) {
         val now = System.currentTimeMillis()
-        val ai = Message(now, "assistant", "", now, model = config.model, streaming = true)
+        val ai = Message(com.chengyan.app.data.IdGen.next(), "assistant", "", now, model = config.model, streaming = true)
         c.messages.add(ai)
         streaming = true
         persist()

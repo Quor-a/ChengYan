@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -313,7 +314,7 @@ private fun ConversationDrawer(
                 .filter { query.isBlank() || it.title.contains(query) || it.messages.any { m -> m.content.contains(query) } }
                 .sortedByDescending { it.updated }
             LazyColumn {
-                items(filtered, key = { it.id }) { c ->
+                itemsIndexed(filtered, key = { i, c -> "conv_${c.id}_$i" }) { _, c ->
                     ConversationRow(c, c.id == currentId, onPick, onDelete)
                 }
                 if (filtered.isEmpty()) {
@@ -389,7 +390,7 @@ private fun ChatArea(vm: ChatViewModel, modifier: Modifier = Modifier, onEdit: (
     Box(modifier) {
         LazyColumn(state = listState, contentPadding = PaddingValues(vertical = 12.dp, horizontal = 14.dp),
             modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            items(msgs, key = { it.id }) { m ->
+            itemsIndexed(msgs, key = { i, m -> "msg_${m.id}_$i" }) { _, m ->
                 MessageBubble(
                     message = m,
                     onCopy = { clipboard.setText(AnnotatedString(m.content)) },
