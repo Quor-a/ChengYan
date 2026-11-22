@@ -1,39 +1,55 @@
 package com.chengyan.app.ui.components
 
+/*
+ * 消息行 —— 交互结构完整移植自 Quor-a/ZorvAI ChatScreen.kt 的 MessageRow：
+ *   · 气泡壳已删除（ZorvAI 原注释「已删除聊天气泡，正文直接走 Markdown 渲染」）：
+ *     正文不再被气泡压窄，颜色只保留文字本身区分（用户暖褐 / AI 墨色），版式交给 Markdown。
+ *   · 头像悬浮在左上角（Box + align(TopStart)），不挤压正文宽度；名字行留头像避让位。
+ *   · 名字行「作者 · 时间」combinedClickable 长按 → MessageHeaderMenu（复制/编辑/删除）。
+ *   · 思考：流式期间内联展示（surfaceVariant 底、限高），完成后折叠为「思考了 Ns ›」行，
+ *     点开全量弹层（ThinkFoldRow 语义）。
+ *   · 工具调用：名字行右侧「· N 工具」TinyChip 开关，点开活动流逐条明细（失败染红），
+ *     点击某条打开详情弹层 —— 不再把整轮过程全量铺在正文里。
+ *   · 操作按钮（复制/重新生成/删除）：只在「最后一条 AI 消息且本轮已结束」平铺
+ *     （ZorvAI showActions 门控；历史消息操作收进名字行长按菜单）。
+ * 视觉仍为澄言原创暖纸×墨×陶土橙。
+ */
+
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
-import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Build
-import androidx.compose.material.icons.rounded.ContentCopy
-import androidx.compose.material.icons.rounded.Edit
-import androidx.compose.material.icons.rounded.Refresh
-import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.chengyan.app.data.Message
+import com.chengyan.app.data.ToolCallInfo
 import com.chengyan.app.ui.theme.*
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -41,9 +57,14 @@ import java.util.Locale
 
 private val timeFmt = SimpleDateFormat("HH:mm", Locale.getDefault())
 
+/** 用户正文暖褐色（与 ZorvAI 删除气泡壳后的文字区分一致）。 */
+private val UserInk = Color(0xFF5A3322)
+
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun MessageBubble(
     message: Message,
+    showActions: Boolean,
     onCopy: () -> Unit,
     onRegenerate: () -> Unit,
     onDelete: () -> Unit,
@@ -51,210 +72,326 @@ fun MessageBubble(
     onEdit: () -> Unit,
 ) {
     val isUser = message.role == "user"
-    Row(
-        Modifier.fillMaxWidth().padding(vertical = 6.dp),
-        horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start
-    ) {
-        if (!isUser) {
-            AiAvatar(Modifier.padding(top = 26.dp))
-            Spacer(Modifier.width(10.dp))
-        }
-        Column(horizontalAlignment = if (isUser) Alignment.End else Alignment.Start, modifier = Modifier.widthIn(max = 312.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text(if (isUser) "你" else "澄言", style = MaterialTheme.typography.labelSmall, color = Ink2)
-                if (!isUser && message.model != null)
-                    Text(message.model, style = MaterialTheme.typography.labelSmall, fontSize = 10.sp, color = Ink3, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
-                Text(timeFmt.format(Date(message.time)), style = MaterialTheme.typography.labelSmall, fontSize = 10.sp, color = Ink4, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
-            }
-            Spacer(Modifier.height(4.dp))
-            Surface(
-                shape = RoundedCornerShape(
-                    topStart = if (isUser) 18.dp else 4.dp,
-                    topEnd = if (isUser) 4.dp else 18.dp,
-                    bottomStart = 18.dp, bottomEnd = 18.dp
-                ),
-                color = if (message.isError) Color(0xFFFDF0EC) else Card,
-                border = BorderStroke(1.dp, if (message.isError) Color(0xFFE0B3A6) else Line),
-                shadowElevation = 1.dp
+    val clipboard = LocalClipboardManager.current
+    val cs = MaterialTheme.colorScheme
+    // 名字行长按菜单（ZorvAI MessageHeaderMenu：复制 / 编辑 / 删除）
+    var headerMenu by remember { mutableStateOf(false) }
+    // 「· N 工具」活动流开关
+    var showActivity by remember { mutableStateOf(false) }
+    // 思考全量弹层 / 工具详情弹层
+    var thinkOpen by remember { mutableStateOf(false) }
+    var toolDetail by remember { mutableStateOf<ToolCallInfo?>(null) }
+    val haptic = androidx.compose.ui.platform.LocalHapticFeedback.current
+
+    // 头像悬浮布局（ZorvAI）：28dp 头像 → 名字行下移 3dp 对齐中线，正文再留 10dp
+    val avatarSize = 28
+    val avatarIndent = (avatarSize + 10).dp
+
+    Box(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
+        // 🔴 头像：悬浮左上角，不是流式兄弟节点（两侧统一靠左，ZorvAI 同款）
+        Box(Modifier.align(Alignment.TopStart)) { if (!isUser) AiAvatar() else UserAvatar() }
+
+        Column(Modifier.fillMaxWidth()) {
+            // ── 名字行：作者 · 模型 · 时间（长按出菜单）+ 工具胶囊 ──
+            Row(
+                horizontalArrangement = Arrangement.Start,
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth().padding(start = avatarIndent, top = 3.dp, bottom = 4.dp),
             ) {
-            if (!message.isError) {
-                if (!isUser) {
-                    if (message.thinking.isNotBlank())
-                        ThinkingCard(message.thinking, message.thinkingMs, message.streaming && message.content.isBlank())
-                    message.toolCalls.forEach { ToolCallCard(it) }
+                Box {
+                    Text(
+                        "${if (isUser) "你" else "澄言"} · ${timeFmt.format(Date(message.time))}",
+                        fontSize = 11.sp,
+                        color = if (isUser) Ink3 else Ink2,
+                        modifier = Modifier.combinedClickable(
+                            onClick = {},
+                            onLongClick = {
+                                haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress)
+                                headerMenu = true
+                            },
+                        ),
+                    )
+                    MessageHeaderMenu(
+                        expanded = headerMenu,
+                        onDismiss = { headerMenu = false },
+                        showEdit = isUser,
+                        onCopy = { headerMenu = false; clipboard.setText(AnnotatedString(message.content)); onCopy() },
+                        onEdit = { headerMenu = false; onEdit() },
+                        onDelete = { headerMenu = false; onDelete() },
+                    )
                 }
-                if (message.images.isNotEmpty()) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.padding(bottom = 6.dp)) {
-                        message.images.forEach { b64 -> ImageThumb(b64) }
+                if (!isUser && message.model != null) {
+                    Spacer(Modifier.width(6.dp))
+                    Text(message.model, fontSize = 10.sp, color = Ink4, fontFamily = FontFamily.Monospace, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                // 「· N 工具」胶囊（ZorvAI TinyChip）：只数工具调用，思考有自己的一行
+                if (!isUser && message.toolCalls.isNotEmpty()) {
+                    Spacer(Modifier.width(6.dp))
+                    TinyChip(
+                        onClick = { showActivity = !showActivity },
+                        containerColor = Accent.copy(alpha = 0.12f),
+                    ) {
+                        Text(
+                            "${if (showActivity) "收起" else "· ${message.toolCalls.size} 工具"}",
+                            fontSize = 9.sp, color = AccentInk,
+                        )
                     }
                 }
-                if (isUser) {
+            }
+
+            // ── 活动流：工具逐条明细（默认收起，失败染红，点击看详情）──
+            if (showActivity && message.toolCalls.isNotEmpty()) {
+                Column(Modifier.fillMaxWidth().padding(start = avatarIndent)) {
+                    message.toolCalls.forEach { t ->
+                        ActivityRow(t) { toolDetail = t }
+                        Spacer(Modifier.height(4.dp))
+                    }
+                }
+                Spacer(Modifier.height(6.dp))
+            }
+
+            // ── 思考：流式内联 / 完成折叠行（ZorvAI ThinkFoldRow）──
+            if (!isUser && message.thinking.isNotBlank()) {
+                val active = message.streaming && message.content.isBlank()
+                if (active) {
+                    ThinkInlineContent(message.thinking)
+                    Spacer(Modifier.height(6.dp))
+                } else {
+                    ThinkFoldRow(
+                        durationMs = message.thinkingMs,
+                        onClick = { thinkOpen = true },
+                    )
+                    Spacer(Modifier.height(6.dp))
+                }
+            }
+
+            // ── 附图 ──
+            if (message.images.isNotEmpty()) {
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.padding(start = avatarIndent, bottom = 6.dp)) {
+                    message.images.forEach { b64 -> ImageThumb(b64) }
+                }
+            }
+
+            // ── 正文（气泡壳已删除，直接渲染，满宽）──
+            Box(Modifier.padding(top = 10.dp)) {
+                if (message.isError) {
+                    Column(Modifier.fillMaxWidth()) {
+                        Text(message.content, style = MaterialTheme.typography.bodySmall, color = Err, lineHeight = 20.sp)
+                        Spacer(Modifier.height(4.dp))
+                        TextButton(onClick = onRetry, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp), modifier = Modifier.height(28.dp)) {
+                            Text("重试", fontSize = 11.sp, color = AccentInk)
+                        }
+                    }
+                } else if (isUser) {
                     Text(
                         message.content,
                         style = MaterialTheme.typography.bodyMedium,
-                        color = Ink,
-                        modifier = Modifier.padding(horizontal = 15.dp, vertical = 11.dp)
+                        color = UserInk,
+                        lineHeight = 23.sp,
+                        modifier = Modifier.fillMaxWidth(),
                     )
                 } else {
-                    Column(Modifier.padding(horizontal = 15.dp, vertical = 11.dp)) {
+                    Column(Modifier.fillMaxWidth()) {
                         MarkdownText(message.content)
                         if (message.streaming) StreamingCursor()
                     }
                 }
-            } else {
-                Column(Modifier.padding(14.dp)) {
-                    Text(message.content, style = MaterialTheme.typography.bodySmall, color = Err)
-                    Spacer(Modifier.height(8.dp))
-                    TextButton(onClick = onRetry, contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp)) {
-                        Text("重试", color = AccentInk, style = MaterialTheme.typography.labelSmall)
-                    }
-                }
             }
-            if (!message.streaming) {
-                Row(Modifier.padding(top = 4.dp)) {
-                    ActionChip(Icons.Rounded.ContentCopy, "复制") {
-                        onCopy()
-                    }
-                    if (isUser) ActionChip(Icons.Rounded.Edit, "编辑", onEdit)
-                    if (!isUser) ActionChip(Icons.Rounded.Refresh, "重新生成", onRegenerate)
-                    ActionChip(Icons.Rounded.DeleteOutline, "删除", onDelete)
-                }
-            }
-        }
-        }
-        if (isUser) {
-            Spacer(Modifier.width(10.dp))
-            Box(
-                Modifier.padding(top = 26.dp).size(30.dp)
-                    .background(Paper3, RoundedCornerShape(9.dp))
-                    .border(1.dp, Line2, RoundedCornerShape(9.dp)),
-                contentAlignment = Alignment.Center
-            ) {
-                Text("你", style = MaterialTheme.typography.labelSmall, color = Ink2)
-            }
-        }
-    }
-}
 
-@Composable
-private fun ThinkingCard(text: String, ms: Long, active: Boolean) {
-    var expanded by remember { mutableStateOf(false) }
-    Surface(
-        shape = RoundedCornerShape(10.dp),
-        color = Paper2,
-        border = BorderStroke(1.dp, Line),
-        modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp)
-    ) {
-        Column {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.fillMaxWidth().clickable { expanded = !expanded }
-                    .padding(horizontal = 12.dp, vertical = 8.dp)
-            ) {
-                if (active) {
-                    Box(Modifier.size(8.dp).background(Accent, CircleShape))
-                    Spacer(Modifier.width(6.dp))
-                }
-                Text(
-                    if (active) "思考中…" else "思考过程",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = if (active) AccentInk else Ink3,
-                    fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold
-                )
-                if (!active && ms > 0) {
-                    Spacer(Modifier.width(6.dp))
-                    Text("· ${ms / 1000}s", style = MaterialTheme.typography.labelSmall, fontSize = 10.sp, color = Ink4, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
-                }
-                Spacer(Modifier.weight(1f))
-                Text(if (expanded) "收起" else "展开", style = MaterialTheme.typography.labelSmall, color = Ink3)
-            }
-            if (expanded) {
-                Text(
-                    text,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = Ink2,
-                    lineHeight = 19.sp,
-                    modifier = Modifier
-                        .heightIn(max = 220.dp)
-                        .verticalScroll(rememberScrollState())
-                        .padding(horizontal = 12.dp, vertical = 4.dp)
-                )
+            // ── 操作按钮行（ZorvAI showActions 门控：只在最后一条 AI 消息且本轮已结束）──
+            if (showActions && !message.streaming) {
                 Spacer(Modifier.height(6.dp))
-            }
-        }
-    }
-}
-
-@Composable
-private fun ToolCallCard(call: com.chengyan.app.data.ToolCallInfo) {
-    var expanded by remember { mutableStateOf(false) }
-    val label = mapOf(
-        "get_current_time" to "查询当前时间",
-        "calculator" to "计算器",
-        "random_number" to "生成随机数",
-    )[call.name] ?: call.name
-    Surface(
-        shape = RoundedCornerShape(10.dp),
-        color = Color(0xFFF3EEE1),
-        border = BorderStroke(1.dp, Line2),
-        modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp)
-    ) {
-        Column {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.fillMaxWidth().clickable { expanded = !expanded }
-                    .padding(horizontal = 12.dp, vertical = 8.dp)
-            ) {
-                Icon(Icons.Rounded.Build, null, Modifier.size(13.dp), tint = AccentInk)
-                Spacer(Modifier.width(7.dp))
-                Text(label, style = MaterialTheme.typography.labelSmall, color = AccentInk,
-                    fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold)
-                Text("· 已执行", style = MaterialTheme.typography.labelSmall, fontSize = 10.sp, color = Ok)
-                Spacer(Modifier.weight(1f))
-                Text(if (expanded) "收起" else "详情", style = MaterialTheme.typography.labelSmall, color = Ink3)
-            }
-            if (expanded) {
-                Column(Modifier.padding(horizontal = 12.dp).padding(bottom = 8.dp)) {
-                    Text("参数", style = MaterialTheme.typography.labelSmall, color = Ink3)
-                    Text(call.arguments.ifBlank { "{}" }, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-                        fontSize = 11.sp, color = Ink2, modifier = Modifier.padding(top = 2.dp))
-                    Spacer(Modifier.height(6.dp))
-                    Text("结果", style = MaterialTheme.typography.labelSmall, color = Ink3)
-                    Text(call.result, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-                        fontSize = 11.sp, color = Ink2, modifier = Modifier.padding(top = 2.dp))
+                Row(Modifier.fillMaxWidth().padding(start = avatarIndent), horizontalArrangement = Arrangement.Start) {
+                    BubbleActionButton("复制", Ink3) { clipboard.setText(AnnotatedString(message.content)); onCopy() }
+                    if (!isUser) BubbleActionButton("重新生成", AccentInk, onRegenerate)
+                    if (isUser) BubbleActionButton("编辑", Ink3, onEdit)
+                    BubbleActionButton("删除", Ink3, onDelete)
                 }
             }
         }
     }
-}
 
-@Composable
-private fun ImageThumb(base64: String) {
-    val bmp = remember(base64) {
-        runCatching {
-            val bytes = android.util.Base64.decode(base64, android.util.Base64.DEFAULT)
-            android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-        }.getOrNull()
+    // 思考过程全量弹层
+    if (thinkOpen) {
+        AlertDialog(
+            onDismissRequest = { thinkOpen = false },
+            title = {
+                Text(
+                    if (message.thinkingMs > 0) "思考了 ${message.thinkingMs / 1000}s" else "思考过程",
+                    fontFamily = FontFamily.Serif, fontWeight = FontWeight.SemiBold,
+                )
+            },
+            text = {
+                Text(
+                    message.thinking,
+                    style = MaterialTheme.typography.bodySmall, color = Ink2, lineHeight = 20.sp,
+                    modifier = Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState()),
+                )
+            },
+            confirmButton = { TextButton(onClick = { thinkOpen = false }) { Text("关闭", color = Ink2) } },
+        )
     }
-    if (bmp != null) {
-        androidx.compose.foundation.Image(
-            bitmap = bmp.asImageBitmap(),
-            contentDescription = "附图",
-            modifier = Modifier.size(110.dp).background(Paper3, RoundedCornerShape(10.dp)),
-            contentScale = androidx.compose.ui.layout.ContentScale.Crop
+
+    // 工具详情弹层（ZorvAI 活动详情弹层语义）
+    toolDetail?.let { t ->
+        AlertDialog(
+            onDismissRequest = { toolDetail = null },
+            title = { Text(toolLabel(t.name), fontFamily = FontFamily.Serif, fontWeight = FontWeight.SemiBold) },
+            text = {
+                Column {
+                    Text("参数", fontSize = 12.sp, color = Ink3, fontWeight = FontWeight.SemiBold)
+                    Text(t.arguments.ifBlank { "{}" }, fontFamily = FontFamily.Monospace, fontSize = 11.sp, color = Ink2,
+                        modifier = Modifier.fillMaxWidth().padding(top = 2.dp))
+                    Spacer(Modifier.height(10.dp))
+                    Text("结果", fontSize = 12.sp, color = Ink3, fontWeight = FontWeight.SemiBold)
+                    Text(t.result.ifBlank { "（执行中…）" }, fontFamily = FontFamily.Monospace, fontSize = 11.sp, color = Ink2,
+                        modifier = Modifier.fillMaxWidth().padding(top = 2.dp).heightIn(max = 260.dp).verticalScroll(rememberScrollState()))
+                }
+            },
+            confirmButton = { TextButton(onClick = { toolDetail = null }) { Text("关闭", color = Ink2) } },
         )
     }
 }
 
+/* ---------- 名字行长按菜单（ZorvAI MessageHeaderMenu） ---------- */
+
 @Composable
-private fun AiAvatar(modifier: Modifier = Modifier) {
+private fun MessageHeaderMenu(
+    expanded: Boolean,
+    onDismiss: () -> Unit,
+    showEdit: Boolean,
+    onCopy: () -> Unit,
+    onEdit: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    androidx.compose.material3.DropdownMenu(expanded = expanded, onDismissRequest = onDismiss) {
+        DropdownMenuItem(text = { Text("复制", fontSize = 14.sp) }, onClick = onCopy)
+        if (showEdit) DropdownMenuItem(text = { Text("编辑", fontSize = 14.sp) }, onClick = onEdit)
+        DropdownMenuItem(text = { Text("删除", fontSize = 14.sp, color = Err) }, onClick = onDelete)
+    }
+}
+
+/* ---------- TinyChip（ZorvAI 同款：20dp 高圆角胶囊） ---------- */
+
+@Composable
+private fun TinyChip(
+    onClick: () -> Unit,
+    containerColor: Color,
+    content: @Composable () -> Unit,
+) {
     Box(
-        modifier.size(30.dp).background(AccentSoft, RoundedCornerShape(9.dp))
+        modifier = Modifier
+            .height(20.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .background(containerColor)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 8.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) { content() }
+    }
+}
+
+/* ---------- 活动流单行（ZorvAI ActivityStream 语义：图标 + 一句话 + 结果预览，失败染红） ---------- */
+
+@Composable
+private fun ActivityRow(t: ToolCallInfo, onOpen: () -> Unit) {
+    val failed = t.result.startsWith("错误") || t.result.startsWith("Error", true)
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(6.dp))
+            .background(if (failed) Err.copy(alpha = 0.08f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+            .clickable(onClick = onOpen)
+            .padding(horizontal = 8.dp, vertical = 6.dp),
+    ) {
+        Icon(Icons.Rounded.Build, null, Modifier.size(12.dp), tint = if (failed) Err else AccentInk)
+        Spacer(Modifier.width(7.dp))
+        Text(toolLabel(t.name), fontSize = 12.sp, color = if (failed) Err else Ink, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Spacer(Modifier.width(6.dp))
+        Text(
+            t.result.take(28),
+            fontSize = 10.sp, color = if (failed) Err else Ink3, maxLines = 1, overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+        Text("›", fontSize = 12.sp, color = Ink4)
+    }
+}
+
+private fun toolLabel(name: String): String = mapOf(
+    "get_current_time" to "查询当前时间",
+    "calculator" to "计算器",
+    "random_number" to "生成随机数",
+)[name] ?: name
+
+/* ---------- ThinkFoldRow / ThinkInlineContent（ZorvAI 同构） ---------- */
+
+@Composable
+private fun ThinkFoldRow(durationMs: Long, onClick: () -> Unit) {
+    val cs = MaterialTheme.colorScheme
+    val label = if (durationMs > 0) "思考了 ${durationMs / 1000}s" else "思考过程"
+    Row(
+        Modifier.fillMaxWidth()
+            .clip(RoundedCornerShape(6.dp))
+            .clickable(onClick = onClick)
+            .padding(vertical = 3.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text("✦", fontSize = 12.sp, color = cs.onSurface.copy(alpha = 0.55f))
+        Spacer(Modifier.width(7.dp))
+        Text(label, fontSize = 13.sp, color = cs.onSurface.copy(alpha = 0.72f))
+        Spacer(Modifier.width(3.dp))
+        Text("›", fontSize = 12.sp, color = cs.onSurface.copy(alpha = 0.45f))
+    }
+}
+
+/** 流式期间内联展示实时思考（surfaceVariant 底 + 细边框，限高滚动）。 */
+@Composable
+private fun ThinkInlineContent(text: String) {
+    val cs = MaterialTheme.colorScheme
+    Column(
+        Modifier.fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(cs.surfaceVariant.copy(alpha = 0.5f))
+            .border(1.dp, Line.copy(alpha = 0.3f), RoundedCornerShape(10.dp))
+            .padding(10.dp, 8.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("✦", fontSize = 11.sp, color = AccentInk)
+            Spacer(Modifier.width(4.dp))
+            Text("思考中…", fontSize = 10.sp, color = AccentInk, fontWeight = FontWeight.Medium)
+        }
+        Spacer(Modifier.height(4.dp))
+        Text(
+            text.takeLast(600),
+            fontSize = 11.sp, color = Ink3, lineHeight = 17.sp,
+            modifier = Modifier.heightIn(max = 140.dp).verticalScroll(rememberScrollState()),
+        )
+    }
+}
+
+/* ---------- 操作按钮（ZorvAI BubbleActionButton：28dp 高文字按钮） ---------- */
+
+@Composable
+private fun BubbleActionButton(label: String, tint: Color, onClick: () -> Unit) {
+    TextButton(
+        onClick = onClick,
+        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+        modifier = Modifier.height(28.dp),
+    ) {
+        Text(label, fontSize = 11.sp, color = tint)
+    }
+}
+
+/* ---------- 头像（澄言原创视觉，布局同 ZorvAI 悬浮位） ---------- */
+
+@Composable
+private fun AiAvatar() {
+    Box(
+        Modifier.size(28.dp).background(AccentSoft, RoundedCornerShape(9.dp))
             .border(1.dp, Color(0xFFEBD2B8), RoundedCornerShape(9.dp)),
         contentAlignment = Alignment.Center
     ) {
-        // 原创星形笔触图标
-        androidx.compose.foundation.Canvas(Modifier.size(18.dp)) {
+        androidx.compose.foundation.Canvas(Modifier.size(16.dp)) {
             val w = size.width; val h = size.height
             val path = androidx.compose.ui.graphics.Path().apply {
                 moveTo(w * 0.18f, h * 0.62f)
@@ -270,19 +407,32 @@ private fun AiAvatar(modifier: Modifier = Modifier) {
 }
 
 @Composable
-private fun ActionChip(icon: ImageVector, label: String, onClick: () -> Unit) {
-    var clicked by remember { mutableStateOf(false) }
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier
-            .clickable { clicked = true; onClick() }
-            .padding(horizontal = 8.dp, vertical = 3.dp)
+private fun UserAvatar() {
+    Box(
+        Modifier.size(28.dp).background(Paper3, RoundedCornerShape(9.dp))
+            .border(1.dp, Line2, RoundedCornerShape(9.dp)),
+        contentAlignment = Alignment.Center
     ) {
-        Icon(icon, null, Modifier.size(13.dp), tint = if (clicked) Ok else Ink3)
-        Spacer(Modifier.width(4.dp))
-        Text(if (clicked) "已复制" else label, style = MaterialTheme.typography.labelSmall, color = if (clicked) Ok else Ink3)
+        Text("你", fontSize = 11.sp, color = Ink2)
     }
-    LaunchedEffect(clicked) { if (clicked) { kotlinx.coroutines.delay(1600); clicked = false } }
+}
+
+@Composable
+private fun ImageThumb(base64: String) {
+    val bmp = remember(base64) {
+        runCatching {
+            val bytes = android.util.Base64.decode(base64, android.util.Base64.DEFAULT)
+            android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+        }.getOrNull()
+    }
+    if (bmp != null) {
+        Image(
+            bitmap = bmp.asImageBitmap(),
+            contentDescription = "附图",
+            modifier = Modifier.size(110.dp).background(Paper3, RoundedCornerShape(10.dp)),
+            contentScale = androidx.compose.ui.layout.ContentScale.Crop
+        )
+    }
 }
 
 @Composable

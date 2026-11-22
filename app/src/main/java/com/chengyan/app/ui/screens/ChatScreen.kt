@@ -390,9 +390,12 @@ private fun ChatArea(vm: ChatViewModel, modifier: Modifier = Modifier, onEdit: (
     Box(modifier) {
         LazyColumn(state = listState, contentPadding = PaddingValues(vertical = 12.dp, horizontal = 14.dp),
             modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            itemsIndexed(msgs, key = { i, m -> "msg_${m.id}_$i" }) { _, m ->
+            itemsIndexed(msgs, key = { i, m -> "msg_${m.id}_$i" }) { i, m ->
+                val lastAiIdx = msgs.indexOfLast { it.role != "user" }
                 MessageBubble(
                     message = m,
+                    // ZorvAI showActions 门控：只在最后一条 AI 消息且本轮已结束时平铺操作行
+                    showActions = i == lastAiIdx && !vm.streaming,
                     onCopy = { clipboard.setText(AnnotatedString(m.content)) },
                     onRegenerate = { vm.regenerate(m) },
                     onDelete = { vm.deleteMessage(m) },
