@@ -266,15 +266,20 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit, onOpenPrefs: () ->
             title = { Text("启用手机能力？", fontFamily = androidx.compose.ui.text.font.FontFamily.Serif, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold) },
             text = {
                 Column {
-                    Text("澄言可以把以下手机能力作为工具交给 AI 调用（按领域聚合，共 6 个工具，只读为主）：", fontSize = 13.sp, lineHeight = 19.sp)
+                    Text("澄言可以把以下手机能力作为工具交给 AI 调用（按领域聚合，共 11 个工具）：", fontSize = 13.sp, lineHeight = 19.sp)
                     Spacer(Modifier.height(8.dp))
                     listOf(
-                        "设备状态 — 电量/网络/内存/时间/剪贴板（无需权限）",
-                        "通讯录 — 搜索、最近联系人",
-                        "短信 — 最近收件、指定号码往来（只读）",
-                        "通话记录 — 最近通话（只读）",
+                        "设备状态 — 电量/网络/内存/时间/剪贴板/音量/勿扰",
+                        "通讯录 — 搜索、最近联系人、新建联系人",
+                        "短信 — 收件箱、指定号码往来、发短信",
+                        "通话 — 通话记录、拨打电话",
                         "日历 — 查询与创建日程",
-                        "相册 — 最近照片，可把照片发给模型看（多模态）",
+                        "媒体库 — 照片/视频/音频，可把照片发给模型看（多模态）",
+                        "位置 — 最近已知位置（经纬度+精度）",
+                        "闹钟 — 设置系统闹钟与计时器",
+                        "应用 — 列出/启动/卸载已安装应用",
+                        "设备控制 — 音量/手电筒/震动/勿扰/亮度/网络面板",
+                        "文件 — 保存到下载目录、应用私有笔记",
                     ).forEach { Text("• $it", fontSize = 12.sp, color = Ink2, lineHeight = 19.sp, modifier = Modifier.padding(vertical = 2.dp)) }
                     Spacer(Modifier.height(8.dp))
                     Text("现在可以拒绝，之后随时在顶栏 ⋮「手机能力授权」开启；工具在权限未授予时会明确告知。", fontSize = 11.sp, color = Ink3, lineHeight = 17.sp)
