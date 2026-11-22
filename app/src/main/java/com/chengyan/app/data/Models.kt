@@ -89,6 +89,7 @@ data class Conversation(
     var created: Long,
     var updated: Long = created,
     var assistantName: String? = null,
+    var soulId: String = "",             // 该对话绑定的灵魂卡 id（ZorvAI：每个对话记住自己的人格）
     val messages: MutableList<Message> = mutableListOf()
 )
 

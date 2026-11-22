@@ -35,6 +35,11 @@ class ChatViewModel(
     val quroCustomProviderRepo = com.chengyan.app.core.model.QuroCustomProviderRepository(appContext)
     val quroMultiProviderRepo = com.chengyan.app.core.model.QuroMultiProviderRepository(appContext)
 
+    // ---- 灵魂卡（语义移植自 ZorvAI QuroPersonaViewModel）----
+    val soulRepo = com.chengyan.app.data.SoulRepository(appContext)
+    var souls by mutableStateOf<List<com.chengyan.app.data.SoulCard>>(emptyList())
+        private set
+
     /** ZorvAI 风格的活跃模型配置（与下方 ModelConfig 同步）。 */
     var quroConfig by mutableStateOf(com.chengyan.app.core.model.QuroModelConfig())
         private set
@@ -77,6 +82,7 @@ class ChatViewModel(
     init {
         viewModelScope.launch { config = settings.config.first() }
         viewModelScope.launch { profiles = settings.profiles.first() }
+        viewModelScope.launch { souls = soulRepo.loadAll() }
         // 加载 ZorvAI 配置层并同步到既有 ModelConfig；同时把预设登记进多提供商仓库（故障转移用）
         viewModelScope.launch {
             quroConfig = quroConfigRepo.load()
@@ -237,7 +243,33 @@ class ChatViewModel(
         return quroMultiProviderRepo.getNextProvider(curId)
     }
 
-    /* ---------- 助手 ---------- */
+    /* ---------- 灵魂卡（ZorvAI 灵魂注入语义） ---------- */
+    fun saveSoul(card: com.chengyan.app.data.SoulCard) {
+        viewModelScope.launch {
+            soulRepo.save(card)
+            souls = soulRepo.loadAll()
+            _toast.value = "已保存灵魂卡「${card.name}」"
+        }
+    }
+
+    fun deleteSoul(id: String) {
+        viewModelScope.launch {
+            soulRepo.delete(id)
+            souls = soulRepo.loadAll()
+            conversations.filter { it.soulId == id }.forEach { it.soulId = "" }
+            persist()
+        }
+    }
+
+    /** 用一张灵魂卡（或 null=不使用）开新对话；对话记住自己的灵魂。 */
+    fun startWithSoul(card: com.chengyan.app.data.SoulCard?) {
+        newConversation()
+        current?.soulId = card?.id ?: ""
+        if (card != null) current?.title = "新对话 · ${card.name}"
+        persist()
+    }
+
+    /* ---------- 助手（保留兼容） ---------- */
     fun startWithAssistant(a: AssistantPreset?) {
         assistant = a
         newConversation()
@@ -365,9 +397,12 @@ class ChatViewModel(
     /* ---------- 内部 ---------- */
     private fun historyUpTo(c: Conversation, endIdx: Int): List<OpenAiClient.ChatTurn> {
         val turns = mutableListOf<OpenAiClient.ChatTurn>()
-        val sys = assistant?.prompt?.takeIf { it.isNotBlank() } ?: config.sysPrompt
+        // 灵魂注入优先级（ZorvAI 语义）：对话绑定的灵魂卡 > 助手预设 > 全局系统提示词 > 默认基线
+        val soul = c.soulId.takeIf { it.isNotBlank() }?.let { id -> souls.firstOrNull { it.id == id } }
+        val soulPrompt = soul?.toSystemPrompt()?.takeIf { it.isNotBlank() }
+        val sys = soulPrompt ?: (assistant?.prompt?.takeIf { it.isNotBlank() } ?: config.sysPrompt)
         // 日期感知默认系统提示（成熟客户端惯例：系统提示注入当天日期；无自定义人设时给基线行为约束）
-        val effectiveSys = sys.ifBlank {
+        val effectiveSys = if (soulPrompt != null) sys else sys.ifBlank {
             val df = java.text.SimpleDateFormat("yyyy年M月d日 EEEE", java.util.Locale.CHINESE)
             "你是澄言，一个简洁、诚实、专业的中文 AI 助手。回答直接、结构清晰，" +
             "不确定的内容要明确说明，不要编造。今天的日期：${df.format(java.util.Date())}。"

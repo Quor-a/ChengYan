@@ -66,7 +66,11 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit, onOpenPrefs: () ->
     var editText by remember { mutableStateOf("") }
     var renaming by remember { mutableStateOf(false) }
     var renameText by remember { mutableStateOf("") }
-    var assistantOpen by remember { mutableStateOf(false) }
+    // 灵魂注入弹层（ZorvAI SoulInjectionSheet）：抽屉「新对话」与 ⋮ 菜单共用入口
+    var soulSheetOpen by remember { mutableStateOf(false) }
+    var soulEditing by remember { mutableStateOf<com.chengyan.app.data.SoulCard?>(null) }
+    var soulEditOpen by remember { mutableStateOf(false) }
+    var soulEditIsNew by remember { mutableStateOf(false) }
     val context = androidx.compose.ui.platform.LocalContext.current
 
     Scaffold(
@@ -132,6 +136,11 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit, onOpenPrefs: () ->
                                 leadingIcon = { Icon(Icons.Rounded.DeleteOutline, null, Modifier.size(17.dp), tint = Ink3) },
                             )
                             DropdownMenuItem(
+                                text = { Text("灵魂注入", fontSize = 14.sp) },
+                                onClick = { menuOpen = false; soulSheetOpen = true },
+                                leadingIcon = { Text("✦", fontSize = 15.sp, color = AccentInk) },
+                            )
+                            DropdownMenuItem(
                                 text = { Text("对话设置（提示词/思考）", fontSize = 14.sp) },
                                 onClick = { menuOpen = false; onOpenPrefs() },
                                 leadingIcon = { Icon(Icons.Rounded.Tune, null, Modifier.size(17.dp), tint = Ink3) },
@@ -161,7 +170,7 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit, onOpenPrefs: () ->
                     currentId = vm.current?.id,
                     onPick = { vm.pick(it); drawerOpen.value = false },
                     onDelete = { confirmDelete = it },
-                    onNew = { drawerOpen.value = false; assistantOpen = true },
+                    onNew = { drawerOpen.value = false; soulSheetOpen = true },
                     onClose = { drawerOpen.value = false }
                 )
             }
@@ -239,39 +248,25 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit, onOpenPrefs: () ->
         )
     }
 
-    if (assistantOpen) {
-        AlertDialog(
-            onDismissRequest = { assistantOpen = false },
-            title = { Text("选择助手开始新对话") },
-            text = {
-                Column {
-                    com.chengyan.app.data.DEFAULT_ASSISTANTS.forEach { a ->
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.fillMaxWidth()
-                                .clickable { vm.startWithAssistant(a); assistantOpen = false }
-                                .padding(vertical = 10.dp)
-                        ) {
-                            Box(Modifier.size(34.dp).background(AccentSoft, RoundedCornerShape(10.dp)),
-                                contentAlignment = Alignment.Center) {
-                                Text(a.icon, color = AccentInk, fontFamily = androidx.compose.ui.text.font.FontFamily.Serif)
-                            }
-                            Spacer(Modifier.width(12.dp))
-                            Column {
-                                Text(a.name, style = MaterialTheme.typography.bodyMedium, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold)
-                                Text(a.prompt.take(24) + "…", style = MaterialTheme.typography.labelSmall, color = Ink3, maxLines = 1)
-                            }
-                        }
-                    }
-                    Text(
-                        "不使用角色（无系统提示词）",
-                        style = MaterialTheme.typography.bodySmall, color = Ink3,
-                        modifier = Modifier.fillMaxWidth().clickable { vm.newConversation(); assistantOpen = false }
-                            .padding(vertical = 12.dp), textAlign = androidx.compose.ui.text.style.TextAlign.Center
-                    )
-                }
-            },
-            confirmButton = {}
+    // 灵魂注入：底部弹层（选卡开新对话）+ 全屏编辑器
+    if (soulSheetOpen) {
+        SoulInjectionSheet(
+            souls = vm.souls,
+            onDismiss = { soulSheetOpen = false },
+            onCreate = { soulSheetOpen = false; soulEditIsNew = true; soulEditing = null; soulEditOpen = true },
+            onEdit = { soulSheetOpen = false; soulEditIsNew = false; soulEditing = it; soulEditOpen = true },
+            onDelete = { vm.deleteSoul(it.id) },
+            onPick = { card -> soulSheetOpen = false; vm.startWithSoul(card) },
+        )
+    }
+    if (soulEditOpen) {
+        SoulEditDialog(
+            initial = soulEditing,
+            onSave = { vm.saveSoul(it) },
+            onDelete = if (!soulEditIsNew) {
+                { soulEditOpen = false; soulEditing?.let { vm.deleteSoul(it.id) } }
+            } else null,
+            onDismiss = { soulEditOpen = false },
         )
     }
 
