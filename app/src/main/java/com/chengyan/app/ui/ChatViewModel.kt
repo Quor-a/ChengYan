@@ -97,6 +97,10 @@ class ChatViewModel(
             chats.conversations.collect { list ->
                 conversations = list
                 current?.let { c -> current = list.firstOrNull { it.id == c.id } ?: c }
+                    ?: run {
+                        // 启动恢复：指向最近更新的对话（有消息才算有记录）
+                        list.filter { it.messages.isNotEmpty() }.maxByOrNull { it.updated }?.let { current = it }
+                    }
             }
         }
     }
@@ -245,7 +249,9 @@ class ChatViewModel(
     /* ---------- 对话 ---------- */
     fun newConversation() {
         val now = System.currentTimeMillis()
-        current = Conversation(id = com.chengyan.app.data.IdGen.next(), title = "新对话", created = now)
+        val c = Conversation(id = com.chengyan.app.data.IdGen.next(), title = "新对话", created = now)
+        current = c
+        conversations = conversations + c
         persist()
     }
 
@@ -285,7 +291,7 @@ class ChatViewModel(
         if (!config.configured) { _toast.value = "请先在设置中完成模型配置"; return }
         val c = current ?: run { newConversation(); current!! }
         val now = System.currentTimeMillis()
-        if (c.messages.isEmpty()) c.title = text.take(18)
+        if (c.messages.isEmpty()) c.title = text.replace("\n", " ").trim().take(18)
         c.messages.add(Message(com.chengyan.app.data.IdGen.next(), "user", text, now, images = images))
         c.updated = now
         request(c, historyUpTo(c, c.messages.lastIndex))
@@ -313,7 +319,7 @@ class ChatViewModel(
         if (idx < 0) return
         msg.content = newText
         while (c.messages.size > idx + 1) c.messages.removeAt(c.messages.size - 1)
-        if (c.messages.size == 1) c.title = newText.take(18)
+        if (c.messages.size == 1) c.title = newText.replace("\n", " ").trim().take(18)
         c.updated = System.currentTimeMillis()
         request(c, historyUpTo(c, idx))
     }
@@ -412,7 +418,7 @@ class ChatViewModel(
             client.complete(cfg, prompt, maxTokens = 32).onSuccess { t ->
                 val title = t.trim().trim('"', '「', '」', '"', '"').replace("\n", " ").take(16)
                 if (title.isNotBlank()) {
-                    c.title = title
+                    c.title = title.replace("\n", " ").trim()
                     c.updated = System.currentTimeMillis()
                     persist()
                     kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) { current = null; current = c }
@@ -527,7 +533,11 @@ class ChatViewModel(
     }
 
     private fun persist() {
-        val snapshot = conversations.toList()
+        // 🔴 快照必须包含 current：newConversation 只改 current 不进列表，
+        //    旧实现存的是不含当前对话的列表 → 重启后记录全部丢失
+        val snapshot = (conversations + listOfNotNull(current)).distinctBy { it.id }
         viewModelScope.launch { chats.save(snapshot) }
+        // 同步回内存列表，保证抽屉/搜索立即可见
+        conversations = snapshot
     }
 }

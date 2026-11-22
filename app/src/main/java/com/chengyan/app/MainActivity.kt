@@ -42,7 +42,7 @@ class MainActivity : ComponentActivity() {
                         onOpenPrefs = { showPrefs = true }
                     )
                 } else {
-                    ChatScreen(vm, onOpenSettings = { showSettings = true })
+                    ChatScreen(vm, onOpenSettings = { showSettings = true }, onOpenPrefs = { showPrefs = true })
                 }
             }
         }

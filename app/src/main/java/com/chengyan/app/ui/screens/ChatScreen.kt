@@ -5,6 +5,8 @@ package com.chengyan.app.ui.screens
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
@@ -19,6 +21,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.AddPhotoAlternate
 import androidx.compose.material.icons.rounded.Menu
+import androidx.compose.material.icons.rounded.MoreVert
+import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.Edit
@@ -51,12 +55,13 @@ import java.util.Locale
 
 private val dayFmt = SimpleDateFormat("M月d日", Locale.getDefault())
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
-fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit) {
+fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit, onOpenPrefs: () -> Unit = {}) {
     val drawerOpen = remember { mutableStateOf(false) }
     val clipboard = LocalClipboardManager.current
     var confirmDelete by remember { mutableStateOf<Long?>(null) }
+    var confirmClear by remember { mutableStateOf(false) }
     var editing by remember { mutableStateOf<Message?>(null) }
     var editText by remember { mutableStateOf("") }
     var renaming by remember { mutableStateOf(false) }
@@ -69,36 +74,74 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit) {
         topBar = {
             TopAppBar(
                 title = {
-                    Column {
-                        Text(vm.current?.title ?: "新对话", style = MaterialTheme.typography.titleMedium, fontFamily = androidx.compose.ui.text.font.FontFamily.Serif)
+                    Column(Modifier.widthIn(max = 200.dp)) {
+                        // 单行省略：会话标题可能很长（旧版多行标题把整个顶栏撑乱）
+                        Text(
+                            vm.current?.title ?: "新对话",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontFamily = androidx.compose.ui.text.font.FontFamily.Serif,
+                            maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                        )
+                        Text(
+                            vm.config.model.ifBlank { "未配置模型" },
+                            style = MaterialTheme.typography.labelSmall, fontSize = 10.sp,
+                            color = Ink4, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                        )
                     }
                 },
                 navigationIcon = {
                     IconButton(onClick = { drawerOpen.value = true }) {
-                        Icon(Icons.Rounded.Menu, "对话列表")
+                        Icon(Icons.Rounded.Menu, "对话列表", tint = Ink2)
                     }
                 },
                 actions = {
                     ModelChip(vm.config, onOpenSettings)
-                    IconButton(
-                        enabled = vm.current?.messages?.isNotEmpty() == true,
-                        onClick = {
-                            vm.exportCurrent()?.let { md ->
-                                val intent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
-                                    type = "text/markdown"
-                                    putExtra(android.content.Intent.EXTRA_TEXT, md)
-                                    putExtra(android.content.Intent.EXTRA_TITLE, vm.current?.title ?: "对话")
-                                }
-                                context.startActivity(android.content.Intent.createChooser(intent, "分享对话"))
-                            }
+                    // 次级操作收进「更多」菜单：顶栏只留状态胶囊 + 一个入口（成熟客户端惯例）
+                    var menuOpen by remember { mutableStateOf(false) }
+                    Box {
+                        IconButton(onClick = { menuOpen = true }) {
+                            Icon(Icons.Rounded.MoreVert, "更多", tint = Ink2)
                         }
-                    ) { Icon(Icons.Rounded.Share, "导出分享", tint = Ink2) }
-                    IconButton(
-                        enabled = vm.current != null,
-                        onClick = { renameText = vm.current?.title ?: ""; renaming = true }
-                    ) { Icon(Icons.Rounded.Edit, "重命名对话", tint = Ink2) }
-                    IconButton(onClick = onOpenSettings) {
-                        Icon(Icons.Rounded.Settings, "设置", tint = Ink2)
+                        DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                            DropdownMenuItem(
+                                text = { Text("导出分享", fontSize = 14.sp) },
+                                enabled = vm.current?.messages?.isNotEmpty() == true,
+                                onClick = {
+                                    menuOpen = false
+                                    vm.exportCurrent()?.let { md ->
+                                        val intent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                                            type = "text/markdown"
+                                            putExtra(android.content.Intent.EXTRA_TEXT, md)
+                                            putExtra(android.content.Intent.EXTRA_TITLE, vm.current?.title ?: "对话")
+                                        }
+                                        context.startActivity(android.content.Intent.createChooser(intent, "分享对话"))
+                                    }
+                                },
+                                leadingIcon = { Icon(Icons.Rounded.Share, null, Modifier.size(17.dp), tint = Ink3) },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("重命名", fontSize = 14.sp) },
+                                enabled = vm.current != null,
+                                onClick = { menuOpen = false; renameText = vm.current?.title ?: ""; renaming = true },
+                                leadingIcon = { Icon(Icons.Rounded.Edit, null, Modifier.size(17.dp), tint = Ink3) },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("清空当前对话", fontSize = 14.sp) },
+                                enabled = vm.current?.messages?.isNotEmpty() == true,
+                                onClick = { menuOpen = false; confirmClear = true },
+                                leadingIcon = { Icon(Icons.Rounded.DeleteOutline, null, Modifier.size(17.dp), tint = Ink3) },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("对话设置（提示词/思考）", fontSize = 14.sp) },
+                                onClick = { menuOpen = false; onOpenPrefs() },
+                                leadingIcon = { Icon(Icons.Rounded.Tune, null, Modifier.size(17.dp), tint = Ink3) },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("模型配置", fontSize = 14.sp) },
+                                onClick = { menuOpen = false; onOpenSettings() },
+                                leadingIcon = { Icon(Icons.Rounded.Settings, null, Modifier.size(17.dp), tint = Ink3) },
+                            )
+                        }
                     }
                     Spacer(Modifier.width(6.dp))
                 },
@@ -106,8 +149,13 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit) {
             )
         }
     ) { pad ->
-        Row(Modifier.padding(pad).fillMaxSize()) {
+        Box(Modifier.padding(pad).fillMaxSize()) {
             if (drawerOpen.value) {
+                // 半透明遮罩：点外部关闭（标准抽屉交互）
+                Box(
+                    Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.25f))
+                        .clickable { drawerOpen.value = false }
+                )
                 ConversationDrawer(
                     conversations = vm.conversations,
                     currentId = vm.current?.id,
@@ -117,7 +165,7 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit) {
                     onClose = { drawerOpen.value = false }
                 )
             }
-            Column(Modifier.weight(1f)) {
+            Column(Modifier.fillMaxSize()) {
                 ChatArea(vm, Modifier.weight(1f), onEdit = { editing = it; editText = it.content })
                 ComposerBar(vm)
             }
@@ -135,6 +183,18 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit) {
                 }
             },
             dismissButton = { TextButton(onClick = { confirmDelete = null }) { Text("取消", color = Ink2) } }
+        )
+    }
+
+    if (confirmClear) {
+        AlertDialog(
+            onDismissRequest = { confirmClear = false },
+            title = { Text("清空当前对话") },
+            text = { Text("将删除当前对话的全部消息，对话本身保留。确定继续？") },
+            confirmButton = {
+                TextButton(onClick = { vm.clearCurrent(); confirmClear = false }) { Text("清空", color = Err) }
+            },
+            dismissButton = { TextButton(onClick = { confirmClear = false }) { Text("取消", color = Ink2) } }
         )
     }
 
@@ -263,9 +323,10 @@ private fun ConversationDrawer(
 ) {
     var query by remember { mutableStateOf("") }
     Surface(
-        modifier = Modifier.fillMaxHeight().width(280.dp),
+        modifier = Modifier.fillMaxHeight().width(300.dp),
+        shape = RoundedCornerShape(topEnd = 18.dp, bottomEnd = 18.dp),
         color = Paper2,
-        shadowElevation = 8.dp
+        shadowElevation = 12.dp
     ) {
         Column(Modifier.padding(12.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -309,13 +370,31 @@ private fun ConversationDrawer(
                 Text("新对话", letterSpacing = 1.5.sp)
             }
             Spacer(Modifier.height(8.dp))
-            Text("最近对话", style = MaterialTheme.typography.labelSmall, color = Ink3, modifier = Modifier.padding(start = 6.dp, top = 8.dp, bottom = 4.dp))
+            // 日期分组（今天 / 昨天 / 7 天内 / 更早）：成熟的会话列表惯例
             val filtered = conversations
                 .filter { query.isBlank() || it.title.contains(query) || it.messages.any { m -> m.content.contains(query) } }
                 .sortedByDescending { it.updated }
-            LazyColumn {
-                itemsIndexed(filtered, key = { i, c -> "conv_${c.id}_$i" }) { _, c ->
-                    ConversationRow(c, c.id == currentId, onPick, onDelete)
+            val groups = remember(filtered) {
+                val now = System.currentTimeMillis()
+                val day = 24 * 3600_000L
+                listOf(
+                    "今天" to { c: Conversation -> now - c.updated < day },
+                    "昨天" to { c: Conversation -> now - c.updated < 2 * day },
+                    "7 天内" to { c: Conversation -> now - c.updated < 7 * day },
+                    "更早" to { _: Conversation -> true },
+                )
+            }
+            LazyColumn(Modifier.padding(top = 4.dp)) {
+                for ((label, pred) in groups) {
+                    val items = filtered.filter(pred)
+                    if (items.isEmpty()) continue
+                    item(key = "sec_$label") {
+                        Text(label, style = MaterialTheme.typography.labelSmall, fontSize = 10.sp, letterSpacing = 1.sp,
+                            color = Ink4, modifier = Modifier.padding(start = 8.dp, top = 12.dp, bottom = 4.dp))
+                    }
+                    itemsIndexed(items, key = { i, c -> "conv_${c.id}_$i" }) { _, c ->
+                        ConversationRow(c, c.id == currentId, onPick, onDelete)
+                    }
                 }
                 if (filtered.isEmpty()) {
                     item { Text("没有匹配的对话", style = MaterialTheme.typography.bodySmall, color = Ink4,
@@ -326,28 +405,52 @@ private fun ConversationDrawer(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ConversationRow(c: Conversation, active: Boolean, onPick: (Long) -> Unit, onDelete: (Long) -> Unit) {
+    // 活动态：左侧陶土竖条 + 淡陶土底；删除按钮只在活动行显示，历史行长按弹删除（避免每行都挂一个垃圾桶的杂乱感）
+    var longPress by remember { mutableStateOf(false) }
     Surface(
-        shape = RoundedCornerShape(9.dp),
-        color = if (active) Card else Color.Transparent,
-        shadowElevation = if (active) 1.dp else 0.dp,
-        modifier = Modifier.fillMaxWidth().clickable { onPick(c.id) }
+        shape = RoundedCornerShape(10.dp),
+        color = if (active) AccentSoft.copy(alpha = 0.55f) else Color.Transparent,
+        shadowElevation = 0.dp,
+        modifier = Modifier.fillMaxWidth()
+            .padding(horizontal = 4.dp, vertical = 1.dp)
+            .combinedClickable(
+                onClick = { onPick(c.id) },
+                onLongClick = { if (!active) longPress = true else onDelete(c.id) },
+            )
     ) {
-        Row(Modifier.padding(horizontal = 11.dp, vertical = 9.dp), verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
+        Row(Modifier.padding(start = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                Modifier.width(3.dp).height(34.dp)
+                    .background(if (active) Accent else Color.Transparent, RoundedCornerShape(2.dp))
+            )
+            Column(Modifier.weight(1f).padding(horizontal = 9.dp, vertical = 9.dp)) {
                 Text(c.title, style = MaterialTheme.typography.bodySmall,
                     color = if (active) Ink else Ink2,
                     fontWeight = if (active) androidx.compose.ui.text.font.FontWeight.SemiBold else null,
                     maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
-                val last = c.messages.lastOrNull()?.content
+                val last = c.messages.lastOrNull()?.content?.replace("\n", " ")
                 if (last != null) Text(last, style = MaterialTheme.typography.labelSmall, fontSize = 11.sp, color = Ink3,
                     maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
             }
             Text(relTime(c.updated), style = MaterialTheme.typography.labelSmall, fontSize = 10.sp, color = Ink4, fontFamily = FontFamily.Monospace)
-            Spacer(Modifier.width(4.dp))
-            Icon(Icons.Rounded.DeleteOutline, "删除", Modifier.size(14.dp).clickable { onDelete(c.id) }, tint = Ink3)
+            Spacer(Modifier.width(6.dp))
+            if (active) {
+                Icon(Icons.Rounded.DeleteOutline, "删除", Modifier.size(15.dp).clickable { onDelete(c.id) }, tint = Ink3)
+                Spacer(Modifier.width(10.dp))
+            }
         }
+    }
+    if (longPress) {
+        AlertDialog(
+            onDismissRequest = { longPress = false },
+            title = { Text("删除对话") },
+            text = { Text("确定删除「${c.title}」？删除后不可恢复。") },
+            confirmButton = { TextButton(onClick = { longPress = false; onDelete(c.id) }) { Text("删除", color = Err) } },
+            dismissButton = { TextButton(onClick = { longPress = false }) { Text("取消", color = Ink2) } }
+        )
     }
 }
 
@@ -388,8 +491,8 @@ private fun ChatArea(vm: ChatViewModel, modifier: Modifier = Modifier, onEdit: (
         return
     }
     Box(modifier) {
-        LazyColumn(state = listState, contentPadding = PaddingValues(vertical = 12.dp, horizontal = 14.dp),
-            modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        LazyColumn(state = listState, contentPadding = PaddingValues(top = 8.dp, bottom = 16.dp, start = 14.dp, end = 14.dp),
+            modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             itemsIndexed(msgs, key = { i, m -> "msg_${m.id}_$i" }) { i, m ->
                 val lastAiIdx = msgs.indexOfLast { it.role != "user" }
                 MessageBubble(
