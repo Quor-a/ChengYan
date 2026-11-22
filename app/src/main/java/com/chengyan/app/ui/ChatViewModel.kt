@@ -60,6 +60,9 @@ class ChatViewModel(
         private set
     var streaming by mutableStateOf(false)
         private set
+    /** 手机能力授权引导：是否已询问过（DataStore 记忆，弹一次）。 */
+    var phoneAsked by mutableStateOf(true)
+        private set
     /** 当前对话使用的助手（决定 system 提示词）。 */
     var assistant by mutableStateOf<AssistantPreset?>(null)
         private set
@@ -69,6 +72,12 @@ class ChatViewModel(
     fun toastShown() { _toast.value = null }
     /** 供 UI 主动提示（已复制等）。 */
     fun showToast(msg: String) { _toast.value = msg }
+
+    /** 手机能力：记录「已询问」，授权结果由系统对话框处理。 */
+    fun markPhoneAsked() {
+        phoneAsked = true
+        viewModelScope.launch { com.chengyan.app.net.PhonePrefs(appContext).setAsked() }
+    }
 
     /** 引用回复：长按消息菜单预填输入框的内容（ComposerBar 收集后清空）。 */
     val composerPrefill = MutableStateFlow<String?>(null)
@@ -83,6 +92,7 @@ class ChatViewModel(
         viewModelScope.launch { config = settings.config.first() }
         viewModelScope.launch { profiles = settings.profiles.first() }
         viewModelScope.launch { souls = soulRepo.loadAll() }
+        viewModelScope.launch { phoneAsked = com.chengyan.app.net.PhonePrefs(appContext).asked() }
         // 加载 ZorvAI 配置层并同步到既有 ModelConfig；同时把预设登记进多提供商仓库（故障转移用）
         viewModelScope.launch {
             quroConfig = quroConfigRepo.load()
@@ -524,7 +534,13 @@ class ChatViewModel(
                     // 执行每个工具调用（参数已在 result 暂存字段中拼好）
                     val executed = pendingCalls.values.map { tc ->
                         val args = tc.result
-                        com.chengyan.app.data.ToolCallInfo(tc.id, tc.name, args, com.chengyan.app.net.Tools.execute(tc.name, args))
+                        val outcome = if (tc.name.startsWith("phone_"))
+                            com.chengyan.app.net.PhoneTools.execute(appContext, tc.name, args)
+                        else
+                            com.chengyan.app.net.ToolOutcome(com.chengyan.app.net.Tools.execute(tc.name, args))
+                        // 手机工具带回的图片（相机/相册）附加到 AI 消息：用户可见，多模态模型下一轮也能看到
+                        outcome.imageBase64?.let { b64 -> if (ai.images.size < 4) ai.images = ai.images + b64 }
+                        com.chengyan.app.data.ToolCallInfo(tc.id, tc.name, args, outcome.result)
                     }
                     ai.toolCalls.addAll(executed)
                     ai.content = contentBuf.toString()

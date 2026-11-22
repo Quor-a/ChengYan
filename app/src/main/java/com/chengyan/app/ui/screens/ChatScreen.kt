@@ -23,6 +23,7 @@ import androidx.compose.material.icons.rounded.AddPhotoAlternate
 import androidx.compose.material.icons.rounded.Menu
 import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.Tune
+import androidx.compose.material.icons.rounded.PhoneAndroid
 import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.Edit
@@ -62,6 +63,11 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit, onOpenPrefs: () ->
     val clipboard = LocalClipboardManager.current
     var confirmDelete by remember { mutableStateOf<Long?>(null) }
     var confirmClear by remember { mutableStateOf(false) }
+    var phoneDialog by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) { if (!vm.phoneAsked) phoneDialog = true }
+    val permLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions()
+    ) { vm.markPhoneAsked() }
     var editing by remember { mutableStateOf<Message?>(null) }
     var editText by remember { mutableStateOf("") }
     var renaming by remember { mutableStateOf(false) }
@@ -144,6 +150,11 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit, onOpenPrefs: () ->
                                 text = { Text("对话设置（提示词/思考）", fontSize = 14.sp) },
                                 onClick = { menuOpen = false; onOpenPrefs() },
                                 leadingIcon = { Icon(Icons.Rounded.Tune, null, Modifier.size(17.dp), tint = Ink3) },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("手机能力授权", fontSize = 14.sp) },
+                                onClick = { menuOpen = false; phoneDialog = true },
+                                leadingIcon = { Icon(Icons.Rounded.PhoneAndroid, null, Modifier.size(17.dp), tint = Ink3) },
                             )
                             DropdownMenuItem(
                                 text = { Text("模型配置", fontSize = 14.sp) },
@@ -245,6 +256,40 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit, onOpenPrefs: () ->
                 }) { Text("保存", color = AccentInk) }
             },
             dismissButton = { TextButton(onClick = { renaming = false }) { Text("取消", color = Ink2) } }
+        )
+    }
+
+    // 手机能力授权引导（完整权限按领域聚合为 6 个工具）
+    if (phoneDialog) {
+        AlertDialog(
+            onDismissRequest = { phoneDialog = false; vm.markPhoneAsked() },
+            title = { Text("启用手机能力？", fontFamily = androidx.compose.ui.text.font.FontFamily.Serif, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold) },
+            text = {
+                Column {
+                    Text("澄言可以把以下手机能力作为工具交给 AI 调用（按领域聚合，共 6 个工具，只读为主）：", fontSize = 13.sp, lineHeight = 19.sp)
+                    Spacer(Modifier.height(8.dp))
+                    listOf(
+                        "设备状态 — 电量/网络/内存/时间/剪贴板（无需权限）",
+                        "通讯录 — 搜索、最近联系人",
+                        "短信 — 最近收件、指定号码往来（只读）",
+                        "通话记录 — 最近通话（只读）",
+                        "日历 — 查询与创建日程",
+                        "相册 — 最近照片，可把照片发给模型看（多模态）",
+                    ).forEach { Text("• $it", fontSize = 12.sp, color = Ink2, lineHeight = 19.sp, modifier = Modifier.padding(vertical = 2.dp)) }
+                    Spacer(Modifier.height(8.dp))
+                    Text("现在可以拒绝，之后随时在顶栏 ⋮「手机能力授权」开启；工具在权限未授予时会明确告知。", fontSize = 11.sp, color = Ink3, lineHeight = 17.sp)
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    phoneDialog = false
+                    vm.markPhoneAsked()
+                    permLauncher.launch(com.chengyan.app.net.PhoneTools.allPermissions.toTypedArray())
+                }) { Text("授权并启用", color = AccentInk) }
+            },
+            dismissButton = {
+                TextButton(onClick = { phoneDialog = false; vm.markPhoneAsked() }) { Text("暂不", color = Ink2) }
+            }
         )
     }
 
