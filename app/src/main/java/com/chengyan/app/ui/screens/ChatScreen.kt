@@ -2,6 +2,9 @@
 
 package com.chengyan.app.ui.screens
 
+import androidx.compose.ui.draw.clip
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -17,6 +20,10 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.AddPhotoAlternate
@@ -47,6 +54,9 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import kotlinx.coroutines.launch
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.chengyan.app.data.Conversation
@@ -69,8 +79,7 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit, onOpenPrefs: () ->
     val openDrawer = { scope.launch { drawerState.open() } }
     val closeDrawer = { scope.launch { drawerState.close() } }
     val clipboard = LocalClipboardManager.current
-    var confirmDelete by remember { mutableStateOf<Long?>(null) }
-    var confirmClear by remember { mutableStateOf(false) }
+        var confirmClear by remember { mutableStateOf(false) }
     var phoneDialog by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { if (!vm.phoneAsked) phoneDialog = true }
     val permLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
@@ -191,8 +200,10 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit, onOpenPrefs: () ->
                         conversations = vm.conversations,
                         currentId = vm.current?.id,
                         onPick = { vm.pick(it); closeDrawer() },
-                        onDelete = { confirmDelete = it },
-                        onNew = { closeDrawer(); soulSheetOpen = true },
+                        onDelete = { vm.deleteConversation(it) },
+                        onNew = { vm.newConversation(); closeDrawer() },
+                        onSoul = { soulSheetOpen = true },
+                        onDeleteAll = { vm.deleteAllConversations() },
                         onClose = { closeDrawer() }
                     )
                 }
@@ -205,20 +216,7 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit, onOpenPrefs: () ->
         }
     }
 
-    confirmDelete?.let { id ->
-        AlertDialog(
-            onDismissRequest = { confirmDelete = null },
-            title = { Text("删除对话") },
-            text = { Text("确定删除这条对话？删除后不可恢复。") },
-            confirmButton = {
-                TextButton(onClick = { vm.deleteConversation(id); confirmDelete = null }) {
-                    Text("删除", color = Err)
-                }
-            },
-            dismissButton = { TextButton(onClick = { confirmDelete = null }) { Text("取消", color = Ink2) } }
-        )
-    }
-
+    
     if (confirmClear) {
         AlertDialog(
             onDismissRequest = { confirmClear = false },
@@ -377,144 +375,141 @@ private fun ConversationDrawer(
     onPick: (Long) -> Unit,
     onDelete: (Long) -> Unit,
     onNew: () -> Unit,
+    onSoul: () -> Unit,
+    onDeleteAll: () -> Unit,
     onClose: () -> Unit,
 ) {
-    var query by remember { mutableStateOf("") }
-    Surface(color = Paper2) {
-        Column(Modifier.fillMaxWidth().padding(horizontal = 14.dp).padding(top = 14.dp, bottom = 12.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-                Box(
-                    Modifier.size(34.dp).background(Accent, RoundedCornerShape(10.dp)),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text("言", color = Color.White, fontFamily = androidx.compose.ui.text.font.FontFamily.Serif, fontSize = 17.sp)
-                }
-                Spacer(Modifier.width(10.dp))
-                Column(Modifier.weight(1f)) {
-                    Text("澄言", fontFamily = androidx.compose.ui.text.font.FontFamily.Serif, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold)
-                    Text("CHENGYAN", fontSize = 9.sp, letterSpacing = 3.sp, color = Ink3, fontFamily = FontFamily.Monospace)
-                }
-                IconButton(onClick = onClose, modifier = Modifier.size(30.dp)) {
-                    Text("✕", fontSize = 15.sp, color = Ink3)
-                }
-            }
-            Spacer(Modifier.height(12.dp))
-            OutlinedTextField(
-                value = query, onValueChange = { query = it },
-                placeholder = { Text("搜索对话…", style = MaterialTheme.typography.bodySmall, color = Ink3) },
-                leadingIcon = { Icon(Icons.Rounded.Search, null, Modifier.size(16.dp), tint = Ink3) },
-                modifier = Modifier.fillMaxWidth(),
-                textStyle = MaterialTheme.typography.bodySmall,
-                shape = RoundedCornerShape(12.dp),
-                colors = OutlinedTextFieldDefaults.colors(
-                    unfocusedContainerColor = Card, focusedContainerColor = Card,
-                    unfocusedBorderColor = Line, focusedBorderColor = Accent2
-                ),
-                singleLine = true
-            )
-            Spacer(Modifier.height(10.dp))
-            Button(
-                onClick = onNew,
-                modifier = Modifier.fillMaxWidth().height(42.dp),
-                shape = RoundedCornerShape(12.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = AccentSoft, contentColor = AccentInk),
-                contentPadding = PaddingValues(vertical = 8.dp)
-            ) {
-                Icon(Icons.Rounded.Add, null, Modifier.size(15.dp))
-                Spacer(Modifier.width(6.dp))
-                Text("新对话", letterSpacing = 1.5.sp)
-            }
-            Spacer(Modifier.height(2.dp))
-            // 日期分组（今天 / 昨天 / 7 天内 / 更早）
-            // 🔴 分组区间必须互斥（下界闭、上界开），否则同一条对话命中两组 → LazyColumn key 撞车闪退
-            val filtered = remember(conversations, query) {
-                conversations.distinctBy { it.id }
-                    .filter { query.isBlank() || it.title.contains(query) || it.messages.any { m -> m.content.contains(query) } }
-                    .sortedByDescending { it.updated }
-            }
-            val groups = remember(filtered) {
-                val now = System.currentTimeMillis()
-                val day = 24 * 3600_000L
-                val age = { c: Conversation -> now - c.updated }
-                listOf(
-                    "今天" to { c: Conversation -> age(c) in 0 until day },
-                    "昨天" to { c: Conversation -> age(c) in day until 2 * day },
-                    "7 天内" to { c: Conversation -> age(c) in 2 * day until 7 * day },
-                    "更早" to { c: Conversation -> age(c) >= 7 * day },
-                )
-            }
-            LazyColumn(Modifier.padding(top = 4.dp), verticalArrangement = Arrangement.spacedBy(1.dp)) {
-                for ((label, pred) in groups) {
-                    val items = filtered.filter(pred)
-                    if (items.isEmpty()) continue
-                    item(key = "sec_$label") {
-                        Text(
-                            label, style = MaterialTheme.typography.labelSmall, fontSize = 10.sp, letterSpacing = 1.5.sp,
-                            color = Ink4, modifier = Modifier.padding(start = 12.dp, top = 14.dp, bottom = 5.dp),
-                        )
-                    }
-                    itemsIndexed(items, key = { i, c -> "conv_${c.id}_$i" }) { _, c ->
-                        ConversationRow(c, c.id == currentId, onPick, onDelete)
-                    }
-                }
-                if (filtered.isEmpty()) {
-                    item { Text("没有匹配的对话", style = MaterialTheme.typography.bodySmall, color = Ink4,
-                        modifier = Modifier.fillMaxWidth().padding(vertical = 24.dp), textAlign = androidx.compose.ui.text.style.TextAlign.Center) }
-                }
-            }
-        }
-    }
-}
-
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-private fun ConversationRow(c: Conversation, active: Boolean, onPick: (Long) -> Unit, onDelete: (Long) -> Unit) {
-    // 活动态：左侧陶土竖条 + 淡陶土底；删除按钮只在活动行显示，历史行长按弹删除（避免每行都挂一个垃圾桶的杂乱感）
-    var longPress by remember { mutableStateOf(false) }
-    Surface(
-        shape = RoundedCornerShape(10.dp),
-        color = if (active) AccentSoft.copy(alpha = 0.55f) else Color.Transparent,
-        shadowElevation = 0.dp,
-        modifier = Modifier.fillMaxWidth()
-            .padding(horizontal = 4.dp, vertical = 1.dp)
-            .combinedClickable(
-                onClick = { onPick(c.id) },
-                onLongClick = { if (!active) longPress = true else onDelete(c.id) },
-            )
+    // 交互结构完整移植 ZorvAI HistoryDrawer：标题行(对话+清空全部+关闭) →
+    // 一行两芯片(新对话+灵魂注入) → 搜索框 → 分组标题+会话行(两行文本, 右侧时间+每行删除) → 确认框
+    var searchQuery by remember { mutableStateOf("") }
+    var pendingDeleteId by remember { mutableStateOf<Long?>(null) }
+    var showDeleteAllConfirm by remember { mutableStateOf(false) }
+    Column(
+        Modifier.fillMaxHeight().width(300.dp).background(Paper2)
+            .border(1.dp, Color.Black.copy(alpha = 0.08f), RoundedCornerShape(0.dp))
     ) {
-        Row(Modifier.padding(start = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-            Box(
-                Modifier.width(3.dp).height(34.dp)
-                    .background(if (active) Accent else Color.Transparent, RoundedCornerShape(2.dp))
+        Row(
+            Modifier.fillMaxWidth().padding(16.dp, 16.dp, 16.dp, 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("对话", fontSize = 18.sp, fontWeight = FontWeight.SemiBold,
+                color = Ink, fontFamily = FontFamily.Serif)
+            Spacer(Modifier.weight(1f))
+            IconButton(onClick = { showDeleteAllConfirm = true }, Modifier.size(36.dp)) {
+                Icon(Icons.Filled.Delete, "清空全部", Modifier.size(20.dp), tint = Err)
+            }
+            IconButton(onClick = onClose, Modifier.size(36.dp)) {
+                Icon(Icons.Filled.Close, "关闭", Modifier.size(20.dp), tint = Ink)
+            }
+        }
+        Column(
+            Modifier.padding(horizontal = 16.dp).fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Row(
+                    Modifier.weight(1f).clip(RoundedCornerShape(12.dp)).background(AccentSoft)
+                        .clickable(onClick = onNew).padding(12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(Icons.Filled.Edit, null, Modifier.size(18.dp), tint = Accent)
+                    Spacer(Modifier.width(10.dp))
+                    Text("新对话", fontSize = 14.sp, color = AccentInk, fontWeight = FontWeight.SemiBold)
+                }
+                Row(
+                    Modifier.weight(1f).clip(RoundedCornerShape(12.dp))
+                        .background(Ink.copy(alpha = 0.06f)).clickable(onClick = onSoul).padding(horizontal = 12.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(Icons.Filled.AutoAwesome, null, Modifier.size(15.dp), tint = Ink2)
+                    Spacer(Modifier.width(8.dp))
+                    Text("灵魂注入", fontSize = 13.sp, color = Ink, fontWeight = FontWeight.Medium,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+            }
+            OutlinedTextField(
+                value = searchQuery,
+                onValueChange = { searchQuery = it },
+                placeholder = { Text("搜索对话标题", fontSize = 13.sp) },
+                singleLine = true,
+                textStyle = androidx.compose.ui.text.TextStyle(fontSize = 14.sp),
+                modifier = Modifier.fillMaxWidth(),
             )
-            Column(Modifier.weight(1f).padding(horizontal = 9.dp, vertical = 9.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(c.title.takeIf { it.isNotBlank() && it != "null" } ?: "新对话", style = MaterialTheme.typography.bodySmall,
-                        color = if (active) Ink else Ink2,
-                        fontWeight = if (active) androidx.compose.ui.text.font.FontWeight.SemiBold else null,
-                        maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f))
-                    Text(relTime(c.updated), style = MaterialTheme.typography.labelSmall, fontSize = 10.sp,
-                        color = Ink4, fontFamily = FontFamily.Monospace)
-                    if (active) {
-                        Spacer(Modifier.width(6.dp))
-                        Icon(Icons.Rounded.DeleteOutline, "删除", Modifier.size(15.dp).clickable { onDelete(c.id) }, tint = Ink3)
+        }
+        Spacer(Modifier.height(8.dp))
+        Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp)) {
+            val filtered = conversations.distinctBy { it.id }.sortedByDescending { it.updated }
+                .filter { searchQuery.isBlank() || it.title.contains(searchQuery, ignoreCase = true) }
+            var lastGroup by remember { mutableStateOf("") }
+            filtered.forEach { c ->
+                val age = System.currentTimeMillis() - c.updated
+                val group = when {
+                    age < 24 * 3600_000L -> "今天"
+                    age < 48 * 3600_000L -> "昨天"
+                    age < 7 * 24 * 3600_000L -> "7 天内"
+                    else -> "更早"
+                }
+                if (group != lastGroup) {
+                    lastGroup = group
+                    Text(group, fontSize = 12.sp, color = Ink4, modifier = Modifier.padding(top = 12.dp, bottom = 4.dp))
+                }
+                val active = c.id == currentId
+                Row(
+                    Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+                        .background(if (active) AccentSoft else Paper2)
+                        .clickable(onClick = { onPick(c.id) })
+                        .padding(12.dp, 10.dp)
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(c.title.takeIf { it.isNotBlank() && it != "null" } ?: "新对话", fontSize = 14.sp,
+                            color = Ink, fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        val sub = c.messages.lastOrNull()?.content?.replace("\n", " ")
+                        if (sub != null) Text(sub, fontSize = 12.sp, color = Ink4, maxLines = 1,
+                            overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 2.dp))
+                    }
+                    Text(relTime(c.updated), fontSize = 11.sp, color = Ink4, modifier = Modifier.padding(start = 8.dp))
+                    IconButton(onClick = { pendingDeleteId = c.id }, Modifier.size(32.dp)) {
+                        Icon(Icons.Filled.Delete, "删除", Modifier.size(18.dp), tint = Ink4)
                     }
                 }
-                val last = c.messages.lastOrNull()?.content?.replace("\n", " ")
-                if (last != null) Text(last, style = MaterialTheme.typography.labelSmall, fontSize = 11.sp, color = Ink3,
-                    maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                    modifier = Modifier.padding(top = 2.dp))
+            }
+            if (filtered.isEmpty()) {
+                Text("没有匹配的对话", fontSize = 13.sp, color = Ink4,
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 24.dp),
+                    textAlign = TextAlign.Center)
             }
         }
     }
-    if (longPress) {
+
+    if (pendingDeleteId != null) {
         AlertDialog(
-            onDismissRequest = { longPress = false },
+            onDismissRequest = { pendingDeleteId = null },
             title = { Text("删除对话") },
-            text = { Text("确定删除「${c.title.takeIf { it.isNotBlank() && it != "null" } ?: "新对话"}」？删除后不可恢复。") },
-            confirmButton = { TextButton(onClick = { longPress = false; onDelete(c.id) }) { Text("删除", color = Err) } },
-            dismissButton = { TextButton(onClick = { longPress = false }) { Text("取消", color = Ink2) } }
+            text = { Text("确定删除这条对话？删除后不可恢复。") },
+            confirmButton = {
+                TextButton(onClick = { onDelete(pendingDeleteId!!); pendingDeleteId = null }) {
+                    Text("删除", color = Err)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingDeleteId = null }) { Text("取消", color = Ink2) }
+            }
+        )
+    }
+    if (showDeleteAllConfirm) {
+        AlertDialog(
+            onDismissRequest = { showDeleteAllConfirm = false },
+            title = { Text("清空全部对话") },
+            text = { Text("确定删除全部对话记录？此操作不可恢复。") },
+            confirmButton = {
+                TextButton(onClick = { onDeleteAll(); showDeleteAllConfirm = false }) {
+                    Text("清空", color = Err)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDeleteAllConfirm = false }) { Text("取消", color = Ink2) }
+            }
         )
     }
 }

@@ -304,6 +304,12 @@ class ChatViewModel(
         assistant = com.chengyan.app.data.DEFAULT_ASSISTANTS.firstOrNull { it.name == name }
     }
 
+    fun deleteAllConversations() {
+        conversations = emptyList()
+        current = null
+        persist()
+    }
+
     fun deleteConversation(id: Long) {
         conversations = conversations.filterNot { it.id == id }
         if (current?.id == id) current = null
