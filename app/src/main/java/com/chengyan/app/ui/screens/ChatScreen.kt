@@ -481,7 +481,7 @@ private fun ConversationRow(c: Conversation, active: Boolean, onPick: (Long) -> 
             )
             Column(Modifier.weight(1f).padding(horizontal = 9.dp, vertical = 9.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(c.title, style = MaterialTheme.typography.bodySmall,
+                    Text(c.title.takeIf { it.isNotBlank() && it != "null" } ?: "新对话", style = MaterialTheme.typography.bodySmall,
                         color = if (active) Ink else Ink2,
                         fontWeight = if (active) androidx.compose.ui.text.font.FontWeight.SemiBold else null,
                         maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
@@ -504,7 +504,7 @@ private fun ConversationRow(c: Conversation, active: Boolean, onPick: (Long) -> 
         AlertDialog(
             onDismissRequest = { longPress = false },
             title = { Text("删除对话") },
-            text = { Text("确定删除「${c.title}」？删除后不可恢复。") },
+            text = { Text("确定删除「${c.title.takeIf { it.isNotBlank() && it != "null" } ?: "新对话"}」？删除后不可恢复。") },
             confirmButton = { TextButton(onClick = { longPress = false; onDelete(c.id) }) { Text("删除", color = Err) } },
             dismissButton = { TextButton(onClick = { longPress = false }) { Text("取消", color = Ink2) } }
         )

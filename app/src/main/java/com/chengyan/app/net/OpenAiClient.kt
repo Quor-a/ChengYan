@@ -276,8 +276,13 @@ class OpenAiClient {
                         (c as? kotlinx.serialization.json.JsonArray)?.firstOrNull()
                     }?.let { ch -> (ch as? kotlinx.serialization.json.JsonObject)?.get("message") }
                         ?.let { m -> (m as? kotlinx.serialization.json.JsonObject)?.get("content") }
-                        ?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content }
-                        ?: throw IllegalStateException("响应格式异常")
+                        ?.let { c ->
+                            val prim = c as? kotlinx.serialization.json.JsonPrimitive
+                            // content 为 JSON null 时返回 null 字符串会污染调用方（曾把标题写成 "null"）
+                            if (prim != null && !prim.isString && prim.content == "null") null else prim?.content
+                        }
+                        ?.takeIf { !it.isNullOrBlank() }
+                        ?: throw IllegalStateException("模型返回了空内容")
                 }
             }
         }
