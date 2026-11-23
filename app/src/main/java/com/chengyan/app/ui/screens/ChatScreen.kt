@@ -553,6 +553,8 @@ private fun relTime(t: Long): String {
 }
 
 /* ---------------- 对话区 ---------------- */
+// 贴底用的大偏移：scrollToItem 超出内容会被钳制到列表末尾 → 稳定停在真正的底部
+private const val SCROLL_BOTTOM_OFFSET = 1_000_000
 @Composable
 private fun ChatArea(vm: ChatViewModel, modifier: Modifier = Modifier, onEdit: (Message) -> Unit = {}) {
     val conv = vm.current
@@ -586,12 +588,13 @@ private fun ChatArea(vm: ChatViewModel, modifier: Modifier = Modifier, onEdit: (
     }
     // 流式跟随：内容增长时贴底。已接近底部 → 瞬时 scrollToItem（不与点击动画/手势抢动画帧）；
     // 离底部远（如刚点了 ↓ 的动画途中）→ 不插手，让动画走完
+    // ⚠ scrollToItem(index) 只把该 item 顶部对齐视口顶——流式长消息必须带大 scrollOffset 才能露出台最新内容
     LaunchedEffect(msgs.size, msgs.lastOrNull()?.content?.length) {
         if (autoFollow.value && msgs.isNotEmpty()) {
             val info = listState.layoutInfo
-            val last = info.visibleItemsInfo.lastOrNull()?.index ?: 0
+            val last = info.visibleItemsInfo.lastOrNull()?.index ?: return@LaunchedEffect
             if (last >= info.totalItemsCount - 2 && info.totalItemsCount > 0) {
-                listState.scrollToItem(info.totalItemsCount - 1)
+                listState.scrollToItem(info.totalItemsCount - 1, SCROLL_BOTTOM_OFFSET)
             }
         }
     }
@@ -631,7 +634,7 @@ private fun ChatArea(vm: ChatViewModel, modifier: Modifier = Modifier, onEdit: (
                     autoFollow.value = true
                     scope.launch {
                         val target = listState.layoutInfo.totalItemsCount - 1
-                        if (target >= 0) listState.animateScrollToItem(target)
+                        if (target >= 0) listState.animateScrollToItem(target, SCROLL_BOTTOM_OFFSET)
                     }
                 },
                 shape = androidx.compose.foundation.shape.CircleShape,

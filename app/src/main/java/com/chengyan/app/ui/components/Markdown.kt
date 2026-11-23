@@ -274,21 +274,33 @@ private fun CodeBlock(lang: String, code: String) {
     }
 }
 
-/** HTML 渲染预览：WebView 沙箱加载（data URL，JS 开启以支持页面自带脚本）。 */
+/** HTML 渲染预览：WebView 加载。源码落缓存文件按 file:// 打开——外部 CDN/SDK 等网络资源可正常解析加载。 */
 @Composable
 private fun HtmlPreview(code: String, modifier: Modifier = Modifier) {
     val ctx = androidx.compose.ui.platform.LocalContext.current
+    // 稳定缓存文件名（内容哈希），避免每次重组重复写盘
+    val file = remember(code) {
+        val name = "html_preview_" + Integer.toHexString(code.hashCode()) + ".html"
+        java.io.File(ctx.cacheDir, name).also { f ->
+            f.writeText(code)
+        }
+    }
     androidx.compose.ui.viewinterop.AndroidView(
         factory = {
             android.webkit.WebView(it).apply {
                 settings.javaScriptEnabled = true
+                settings.domStorageEnabled = true          // localStorage/sessionStorage（SDK 常用）
+                settings.allowFileAccess = true            // file:// 页面自身
                 settings.loadWithOverviewMode = true
                 settings.useWideViewPort = true
+                settings.mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_ALWAYS_ALLOW // https 页面允许 http 资源
+                settings.mediaPlaybackRequiresUserGesture = false
                 setBackgroundColor(android.graphics.Color.WHITE)
             }
         },
         update = { wv ->
-            wv.loadDataWithBaseURL(null, code, "text/html", "utf-8", null)
+            val url = "file://" + file.absolutePath
+            if (wv.url != url) wv.loadUrl(url)
         },
         modifier = modifier
     )
