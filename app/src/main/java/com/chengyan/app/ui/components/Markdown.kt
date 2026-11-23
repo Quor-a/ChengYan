@@ -25,6 +25,8 @@ import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.draw.clip
+import androidx.compose.foundation.layout.*
 import com.chengyan.app.ui.theme.*
 
 /** 轻量 Markdown 解析结果节点。 */
@@ -181,9 +183,9 @@ private fun CodeBlock(lang: String, code: String) {
     val clipboard = LocalClipboardManager.current
     val scope = rememberCoroutineScope()
     var copied by remember { mutableStateOf(false) }
-    // 🔴 长代码默认只显示一半（折叠），点开显示全部；html 支持渲染预览
+    // 🔴 长代码默认折叠，点开显示全部；html 块：默认源码，「全屏预览」弹出整屏渲染
     var expanded by remember(code) { mutableStateOf(false) }
-    var showPreview by remember(code) { mutableStateOf(true) }
+    var fullscreen by remember(code) { mutableStateOf(false) }
     val isHtml = lang.equals("html", true) || lang.equals("htm", true)
     val isLong = code.count { it == '\n' } + 1 > 12
 
@@ -199,9 +201,9 @@ private fun CodeBlock(lang: String, code: String) {
             Spacer(Modifier.weight(1f))
             if (isHtml) {
                 Text(
-                    if (showPreview) "源码" else "预览",
-                    fontSize = 11.sp, color = Color(0xFF8A8069),
-                    modifier = Modifier.chip().clickable { showPreview = !showPreview }
+                    "全屏预览",
+                    fontSize = 11.sp, color = Ok,
+                    modifier = Modifier.chip().clickable { fullscreen = true }
                 )
             }
             Text(
@@ -218,23 +220,19 @@ private fun CodeBlock(lang: String, code: String) {
                 }
             )
         }
-        if (isHtml && showPreview) {
-            HtmlPreview(code)
-        } else {
-            Text(
-                code,
-                fontFamily = FontFamily.Monospace,
-                fontSize = 12.sp,
-                lineHeight = 19.sp,
-                color = CodeFg,
-                modifier = Modifier
-                    .verticalScroll(rememberScrollState())
-                    .heightIn(max = if (expanded || !isLong) 4000.dp else 170.dp)
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState())
-                    .padding(14.dp)
-            )
-        }
+        Text(
+            code,
+            fontFamily = FontFamily.Monospace,
+            fontSize = 12.sp,
+            lineHeight = 19.sp,
+            color = CodeFg,
+            modifier = Modifier
+                .verticalScroll(rememberScrollState())
+                .heightIn(max = if (expanded || !isLong) 4000.dp else 170.dp)
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState())
+                .padding(14.dp)
+        )
         if (isLong) {
             Box(Modifier.fillMaxWidth().background(CodeHead, RoundedCornerShape(bottomStart = 12.dp, bottomEnd = 12.dp)).clickable { expanded = !expanded }.padding(vertical = 7.dp),
                 contentAlignment = Alignment.Center) {
@@ -242,11 +240,42 @@ private fun CodeBlock(lang: String, code: String) {
             }
         }
     }
+    // 全屏渲染预览（Dialog 整屏 WebView）
+    if (fullscreen) {
+        androidx.compose.ui.window.Dialog(
+            onDismissRequest = { fullscreen = false },
+            properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)
+        ) {
+            Box(
+                Modifier.fillMaxSize().background(Color(0xCC141210)),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(Modifier.fillMaxSize().padding(vertical = 40.dp, horizontal = 8.dp)) {
+                    Row(
+                        Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("HTML 预览", color = Color(0xFFD8D2C4), fontSize = 13.sp)
+                        Spacer(Modifier.weight(1f))
+                        Text(
+                            "关闭 ✕",
+                            fontSize = 12.sp, color = Color(0xFFD8D2C4),
+                            modifier = Modifier.chip().clickable { fullscreen = false }
+                        )
+                    }
+                    Box(Modifier.weight(1f).fillMaxWidth().clip(RoundedCornerShape(12.dp))) {
+                        HtmlPreview(code, Modifier.fillMaxSize())
+                    }
+                }
+            }
+        }
+    }
 }
 
 /** HTML 渲染预览：WebView 沙箱加载（data URL，JS 开启以支持页面自带脚本）。 */
 @Composable
-private fun HtmlPreview(code: String) {
+private fun HtmlPreview(code: String, modifier: Modifier = Modifier) {
     val ctx = androidx.compose.ui.platform.LocalContext.current
     androidx.compose.ui.viewinterop.AndroidView(
         factory = {
@@ -254,13 +283,13 @@ private fun HtmlPreview(code: String) {
                 settings.javaScriptEnabled = true
                 settings.loadWithOverviewMode = true
                 settings.useWideViewPort = true
-                setBackgroundColor(android.graphics.Color.TRANSPARENT)
+                setBackgroundColor(android.graphics.Color.WHITE)
             }
         },
         update = { wv ->
             wv.loadDataWithBaseURL(null, code, "text/html", "utf-8", null)
         },
-        modifier = Modifier.fillMaxWidth().height(300.dp)
+        modifier = modifier
     )
 }
 
