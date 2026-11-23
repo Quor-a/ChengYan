@@ -25,8 +25,12 @@ class MainActivity : ComponentActivity() {
             ChengYanTheme {
                 var showSettings by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
                 var showPrefs by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
+                var showTerminal by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
                 val vm: ChatViewModel = viewModel(factory = ChatViewModelFactory(appContext, settings, chats))
-                if (showPrefs) {
+                com.chengyan.app.data.LinuxBridge.init(appContext)
+                if (showTerminal) {
+                    com.chengyan.app.ui.screens.TerminalScreen(onBack = { showTerminal = false })
+                } else if (showPrefs) {
                     ChatPrefsScreen(
                         config = vm.config,
                         vm = vm,
@@ -42,7 +46,7 @@ class MainActivity : ComponentActivity() {
                         onOpenPrefs = { showPrefs = true }
                     )
                 } else {
-                    ChatScreen(vm, onOpenSettings = { showSettings = true }, onOpenPrefs = { showPrefs = true })
+                    ChatScreen(vm, onOpenSettings = { showSettings = true }, onOpenPrefs = { showPrefs = true }, onOpenTerminal = { showTerminal = true })
                 }
             }
         }

@@ -1,5 +1,7 @@
 package com.chengyan.app.net
 
+import com.chengyan.app.data.LinuxBridge
+
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -52,9 +54,25 @@ object Tools {
                 })
             })
         })
+        add(buildJsonObject {
+            put("type", "function")
+            put("function", buildJsonObject {
+                put("name", "linux")
+                put("description", "操控设备内置的 Linux 环境（busybox 命令集，进程内 ARM64 二进制翻译运行，无 root）。" +
+                    "支持文件读写、文本处理、计算、shell 管道等。AI 自主编排长程任务：run 启动后立即返回，" +
+                    "用 poll 跟踪输出，用 wait 等退出，restart 硬中断。命令在 rootfs 内执行（/rootfs 为工作根）。")
+                put("parameters", buildJsonObject {
+                    put("type", "object")
+                    put("properties", buildJsonObject {
+                        put("action", buildJsonObject { put("type", "string"); put("description", "run=启动命令（立即返回）/ poll=查状态与输出 / wait=等退出（限时）/ restart=重建会话") })
+                        put("command", buildJsonObject { put("type", "string"); put("description", "run 时的 busybox 命令，如 `ls /`、`echo hi > a.txt`、`wc -c a.txt`；支持引号包裹参数" ) })
+                        put("timeout_secs", buildJsonObject { put("type", "number"); put("description", "wait 的最长等待秒数（默认 60，上限 600）" ) })
+                    })
+                    put("required", buildJsonArray { add(kotlinx.serialization.json.JsonPrimitive("action")) })
+                })
+            })
+        })
     }
-
-    /** 执行工具调用，返回结果文本（错误也作为文本回传给模型）。 */
     fun execute(name: String, argumentsJson: String): String = runCatching {
         val json = kotlinx.serialization.json.Json { ignoreUnknownKeys = true }
         val args = json.parseToJsonElement(argumentsJson.ifBlank { "{}" }) as kotlinx.serialization.json.JsonObject
@@ -79,9 +97,74 @@ object Tools {
                 val min = num("min").toLong(); val max = num("max").toLong()
                 "随机数（$min~$max）：${(min..max).random()}"
             }
+            "linux" -> LinuxTool.run(str("action") ?: "run", str("command"), num("timeout_secs"))
             else -> "未知工具：$name"
         }
     }.getOrElse { "工具执行出错：${it.message}" }
+}
+
+/**
+ * 单工具 `linux`：完整操控内置 Linux（busybox + ARM64 二进制翻译引擎，进程内无 root 运行）。
+ * AI 自主编排长程任务：action=run 启动命令立即返回（不阻塞长任务）→ poll 轮询输出与状态
+ * → wait 等退出（限时）→ restart 硬中断重来。没有内置固定流程。
+ */
+object LinuxTool {
+
+    private const val POLL_MS = 150L
+    private const val MAX_OUTPUT_CHARS = 8000
+
+    fun run(action: String, command: String?, timeoutSecs: Double?): String {
+        return try {
+            when (action) {
+                "run" -> {
+                    val cmd = command?.trim().takeUnless { it.isNullOrEmpty() }
+                        ?: return "错误：run 需要 command（busybox 命令，如 `ls /rootfs`、`cat 文件`）"
+                    val task = LinuxBridge.run(cmd)
+                    when {
+                        task == -3L -> "会话忙：上一个命令还在跑。先 poll 看状态，或 wait 等退出。"
+                        task < 0 -> "启动失败（task=$task）"
+                        else -> {
+                            // 给短命令一点时间跑完再首次读取
+                            Thread.sleep(POLL_MS)
+                            val s = LinuxBridge.poll()
+                            format(task, s)
+                        }
+                    }
+                }
+                "poll" -> {
+                    val s = LinuxBridge.poll()
+                    if (!s.busy && s.exit == null) "会话空闲：还没有任务在跑。"
+                    else format(0, s)
+                }
+                "wait" -> {
+                    val timeout = ((timeoutSecs ?: 60.0).coerceIn(1.0, 600.0) * 1000).toLong()
+                    val deadline = System.currentTimeMillis() + timeout
+                    var s = LinuxBridge.poll()
+                    while (s.busy && System.currentTimeMillis() < deadline) {
+                        Thread.sleep(POLL_MS)
+                        s = LinuxBridge.poll()
+                    }
+                    if (s.busy) "仍在运行（等待超时 ${timeout / 1000}s）。继续用 poll 跟踪。" else format(0, s)
+                }
+                "restart" -> if (LinuxBridge.restart()) "会话已重建（硬中断，一切清空）。"
+                    else "重建失败"
+                else -> "未知 action：$action（可用：run / poll / wait / restart）"
+            }
+        } catch (e: Exception) {
+            "linux 工具出错：${e.message}"
+        }
+    }
+
+    private fun format(task: Long, s: LinuxBridge.State): String {
+        val head = if (task > 0) "任务 $task 已启动。" else ""
+        val status = if (s.busy) "状态：运行中" else "状态：已退出（code=${s.exit}）"
+        val body = if (s.output.isBlank()) "（暂无输出）"
+        else {
+            val o = s.output
+            if (o.length > MAX_OUTPUT_CHARS) "…[截断]\n" + o.takeLast(MAX_OUTPUT_CHARS) else o
+        }
+        return "$head\n$status\n输出：\n$body"
+    }
 }
 
 /** 递归下降算术表达式求值（+ - * / % ^ 和括号），无外部依赖。 */
