@@ -566,17 +566,33 @@ private fun ChatArea(vm: ChatViewModel, modifier: Modifier = Modifier, onEdit: (
     var editSoulOpen by remember { mutableStateOf(false) }
     var editUserOpen by remember { mutableStateOf(false) }
 
-    // 智能滚动：仅当用户位于底部附近才自动跟随
+    // 智能滚动：流式输出时自动贴底跟随；用户向上滑动即停止跟随；↓ 或手动滚回底部恢复跟随
     val autoFollow = remember { mutableStateOf(true) }
-    LaunchedEffect(listState.isScrollInProgress) {
-        if (!listState.isScrollInProgress) {
-            val last = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
-            autoFollow.value = last >= listState.layoutInfo.totalItemsCount - 2
+    // 用户在流式跟随期间向上滑动 → 立即停止跟随（方向侦测，不用等滚动停下）
+    LaunchedEffect(listState) {
+        var lastFirst = listState.firstVisibleItemIndex
+        snapshotFlow { listState.firstVisibleItemIndex }.collect { idx ->
+            if (listState.isScrollInProgress && idx < lastFirst) autoFollow.value = false
+            lastFirst = idx
         }
     }
+    // 滚动停止时：位于底部附近 → 恢复跟随
+    LaunchedEffect(listState.isScrollInProgress) {
+        if (!listState.isScrollInProgress) {
+            val info = listState.layoutInfo
+            val last = info.visibleItemsInfo.lastOrNull()?.index ?: 0
+            if (last >= info.totalItemsCount - 2) autoFollow.value = true
+        }
+    }
+    // 流式跟随：内容增长时贴底。已接近底部 → 瞬时 scrollToItem（不与点击动画/手势抢动画帧）；
+    // 离底部远（如刚点了 ↓ 的动画途中）→ 不插手，让动画走完
     LaunchedEffect(msgs.size, msgs.lastOrNull()?.content?.length) {
         if (autoFollow.value && msgs.isNotEmpty()) {
-            listState.animateScrollToItem(listState.layoutInfo.totalItemsCount - 1)
+            val info = listState.layoutInfo
+            val last = info.visibleItemsInfo.lastOrNull()?.index ?: 0
+            if (last >= info.totalItemsCount - 2 && info.totalItemsCount > 0) {
+                listState.scrollToItem(info.totalItemsCount - 1)
+            }
         }
     }
 
