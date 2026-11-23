@@ -227,8 +227,9 @@ private fun CodeBlock(lang: String, code: String) {
             lineHeight = 19.sp,
             color = CodeFg,
             modifier = Modifier
-                .verticalScroll(rememberScrollState())
+                // heightIn 必须在 verticalScroll 之前：先收住高度，滚动组件才不会拿到无限约束（否则必崩）
                 .heightIn(max = if (expanded || !isLong) 4000.dp else 170.dp)
+                .verticalScroll(rememberScrollState())
                 .fillMaxWidth()
                 .horizontalScroll(rememberScrollState())
                 .padding(14.dp)
