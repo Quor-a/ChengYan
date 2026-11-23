@@ -19,6 +19,7 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import com.chengyan.app.ui.components.monoSafe
+import com.chengyan.app.ui.theme.FontCJK
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
@@ -91,13 +92,13 @@ fun TerminalScreen(onBack: () -> Unit) {
             Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text("‹ 返回", color = Ink2, fontSize = 14.sp, modifier = Modifier.clickable { onBack() })
+            Text("‹ 返回", color = Ink2, fontSize = 14.sp, fontFamily = FontCJK, modifier = Modifier.clickable { onBack() })
             Spacer(Modifier.width(12.dp))
-            Text("Linux 终端", color = TermFg, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+            Text("Linux 终端", color = TermFg, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, fontFamily = FontCJK)
             Spacer(Modifier.weight(1f))
             Text(
                 if (st.busy) "● 运行中" else if (st.exit != null) "○ 退出 ${st.exit}" else "○ 空闲",
-                color = if (st.busy) Ok else Ink3, fontSize = 12.sp
+                color = if (st.busy) Ok else Ink3, fontSize = 12.sp, fontFamily = FontCJK
             )
         }
         // 输出区
@@ -111,6 +112,7 @@ fun TerminalScreen(onBack: () -> Unit) {
                     fontSize = 12.sp,
                     lineHeight = 18.sp,
                     color = TermFg,
+                    fontFamily = FontCJK,
                     modifier = Modifier.verticalScroll(outScroll).padding(12.dp)
                 )
             }
@@ -166,7 +168,7 @@ fun TerminalScreen(onBack: () -> Unit) {
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
                 keyboardActions = KeyboardActions(onSend = { send(input); input = "" }),
                 decorationBox = { inner ->
-                    Box { if (input.isEmpty()) Text("输入 busybox 命令…", color = Ink3, fontSize = 13.sp); inner() }
+                    Box { if (input.isEmpty()) Text("输入 busybox 命令…", color = Ink3, fontSize = 13.sp, fontFamily = FontCJK); inner() }
                 }
             )
             Surface(
@@ -174,7 +176,7 @@ fun TerminalScreen(onBack: () -> Unit) {
                 shape = RoundedCornerShape(10.dp), color = AccentInk,
                 modifier = Modifier.padding(start = 4.dp)
             ) {
-                Text("运行", color = Color(0xFF26221C), fontSize = 13.sp, modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp))
+                Text("运行", color = Color(0xFF26221C), fontSize = 13.sp, fontFamily = FontCJK, modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp))
             }
         }
     }
@@ -183,7 +185,7 @@ fun TerminalScreen(onBack: () -> Unit) {
 @Composable
 private fun QuickKey(label: String, onClick: () -> Unit) {
     Text(
-        label, fontSize = 12.sp, color = Ink2,
+        label, fontSize = 12.sp, color = Ink2, fontFamily = FontCJK,
         modifier = Modifier
             .background(Color(0xFF3A3428), RoundedCornerShape(8.dp))
             .clickable { onClick() }

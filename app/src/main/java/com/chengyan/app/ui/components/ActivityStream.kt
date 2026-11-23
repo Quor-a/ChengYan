@@ -35,6 +35,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
+import com.chengyan.app.ui.theme.FontCJK
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -351,7 +352,7 @@ private fun MonoBlock(text: String, maxHeight: Int, color: Color? = null) {
             .verticalScroll(rememberScrollState())
             .horizontalScroll(rememberScrollState()),
     ) {
-        Text(text, fontSize = 11.sp, lineHeight = 16.sp, fontFamily = FontFamily.Monospace,
+        Text(text, fontSize = 11.sp, lineHeight = 16.sp, fontFamily = monoSafe(text),
             softWrap = false, color = color ?: Ink.copy(alpha = 0.9f),
             modifier = Modifier.padding(horizontal = 11.dp, vertical = 9.dp))
     }
