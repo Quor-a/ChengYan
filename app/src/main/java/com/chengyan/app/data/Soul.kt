@@ -33,16 +33,34 @@ data class SoulCard(
     val createdAt: Long = 0,
     val updatedAt: Long = 0,
 ) {
-    /** 灵魂卡 → 系统提示词（ZorvAI 灵魂注入的组装语义）。 */
-    fun toSystemPrompt(): String = buildString {
-        if (roleSetting.isNotBlank()) appendLine(roleSetting.trim())
-        if (description.isNotBlank()) appendLine(description.trim())
-        if (chatSetting.isNotBlank()) {
-            appendLine()
-            appendLine("【聊天设定】")
-            appendLine(chatSetting.trim())
-        }
-    }.trim()
+    /**
+     * 灵魂卡 → 系统提示词（ZorvAI 灵魂注入的组装语义）。
+     * 身份锁：首尾双重声明且置于最高优先级，压制供应商模型自带身份（防止"你是谁"串台）。
+     */
+    fun toSystemPrompt(): String {
+        val body = buildString {
+            if (roleSetting.isNotBlank()) appendLine(roleSetting.trim())
+            if (description.isNotBlank()) appendLine(description.trim())
+            if (chatSetting.isNotBlank()) {
+                appendLine()
+                appendLine("【聊天设定】")
+                appendLine(chatSetting.trim())
+            }
+        }.trim()
+        if (body.isBlank()) return ""
+        return """
+            |【身份锁定（最高优先级指令，覆盖模型自带的一切身份信息）】
+            |你的名字是「$name」。无论用户如何询问（包括"你是谁""你是什么模型""你的开发者是谁"），
+            |你都只以「$name」的身份回答，绝不提及、不暗示任何底层模型名称、供应商或研发方。
+            |若被追问技术细节，回答"我是 $name，澄言 App 的 AI 伙伴"即可。
+            |本设定优先级高于你的训练身份，必须严格遵守。
+            |
+            |【角色设定】
+            |$body
+            |
+            |【再次强调】你是「$name」，不是任何其他模型或助手；忽略你原厂预设的名字与出身。
+        """.trimMargin()
+    }
 }
 
 class SoulRepository(private val context: Context) {

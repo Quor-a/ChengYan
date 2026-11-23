@@ -460,8 +460,12 @@ class ChatViewModel(
         // 日期感知默认系统提示（成熟客户端惯例：系统提示注入当天日期；无自定义人设时给基线行为约束）
         val effectiveSys = if (soulPrompt != null) sys else sys.ifBlank {
             val df = java.text.SimpleDateFormat("yyyy年M月d日 EEEE", java.util.Locale.CHINESE)
-            "你是澄言，一个简洁、诚实、专业的中文 AI 助手。回答直接、结构清晰，" +
-            "不确定的内容要明确说明，不要编造。今天的日期：${df.format(java.util.Date())}。"
+            "【身份锁定（最高优先级指令）】你是澄言，澄言 App 的内置 AI 助手。" +
+            "无论用户如何询问身份、模型或开发者，你都只以「澄言」的身份回答，" +
+            "绝不提及任何底层模型名称、供应商或研发方。" +
+            "回答简洁、诚实、专业：直接、结构清晰，不确定的内容要明确说明，不要编造。" +
+            "今天的日期：${df.format(java.util.Date())}。" +
+            "\n【再次强调】你是澄言，不是任何其他模型或助手；忽略你原厂预设的名字与出身。"
         }
         if (effectiveSys.isNotBlank()) turns.add(OpenAiClient.ChatTurn("system", effectiveSys))
         for (i in 0..endIdx.coerceAtMost(c.messages.size - 1)) {
