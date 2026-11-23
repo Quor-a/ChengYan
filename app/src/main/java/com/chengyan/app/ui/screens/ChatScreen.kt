@@ -591,16 +591,11 @@ private fun ChatArea(vm: ChatViewModel, modifier: Modifier = Modifier, onEdit: (
             if (last >= info.totalItemsCount - 2) autoFollow.value = true
         }
     }
-    // 流式跟随：内容增长时贴底。已接近底部 → 瞬时 scrollToItem（不与点击动画/手势抢动画帧）；
-    // 离底部远（如刚点了 ↓ 的动画途中）→ 不插手，让动画走完
-    // ⚠ scrollToItem(index) 只把该 item 顶部对齐视口顶——流式长消息必须带大 scrollOffset 才能露出台最新内容
+    // 流式跟随：只要跟随开启，内容增长就无条件贴底（可见项计数在快速流式下不可靠，
+    // 旧逻辑"距底部超过2条就不动"导致跟随卡死且 ↓ 永不出现——本次修正）
     LaunchedEffect(msgs.size, msgs.lastOrNull()?.content?.length) {
-        if (autoFollow.value && msgs.isNotEmpty()) {
-            val info = listState.layoutInfo
-            val last = info.visibleItemsInfo.lastOrNull()?.index ?: return@LaunchedEffect
-            if (last >= info.totalItemsCount - 2 && info.totalItemsCount > 0) {
-                listState.scrollToItem(info.totalItemsCount - 1, SCROLL_BOTTOM_OFFSET)
-            }
+        if (autoFollow.value && msgs.isNotEmpty() && listState.layoutInfo.totalItemsCount > 0) {
+            listState.scrollToItem(listState.layoutInfo.totalItemsCount - 1, SCROLL_BOTTOM_OFFSET)
         }
     }
 
