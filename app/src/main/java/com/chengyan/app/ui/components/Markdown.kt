@@ -334,8 +334,8 @@ fun buildAnnotated(spans: List<MdSpan>): AnnotatedString {
 }
 
 
-/** Android 默认等宽字体（Droid Sans Mono）不含 CJK 字形，中文会渲染成豆腐块；
- *  文本含 CJK 时回退到默认字体（Roboto 自带 CJK 回退链）。 */
+/** Android 等宽字体不含 CJK 字形；文本含 CJK 时用内置 CJK 字体（FontCJK），
+ *  纯 ASCII 才用 Monospace。 */
 fun monoSafe(text: String) =
     if (text.any { it.code in 0x2E80..0x9FFF || it.code in 0xF900..0xFAFF || it.code in 0xFF00..0xFFEF })
-        FontFamily.Default else FontFamily.Monospace
+        com.chengyan.app.ui.theme.FontCJK else FontFamily.Monospace

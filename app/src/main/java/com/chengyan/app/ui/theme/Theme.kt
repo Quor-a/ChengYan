@@ -1,11 +1,16 @@
 package com.chengyan.app.ui.theme
 
+import com.chengyan.app.R
+
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.Font
+import androidx.compose.ui.text.font.FontFamily
 
 // 澄言原创配色：暖纸 × 墨色 × 陶土橙
 val Ink = Color(0xFF26221C)
@@ -74,6 +79,32 @@ private val DarkColors = darkColorScheme(
 fun ChengYanTheme(darkTheme: Boolean = isSystemInDarkTheme(), content: @Composable () -> Unit) {
     MaterialTheme(
         colorScheme = if (darkTheme) DarkColors else LightColors,
+        typography = AppTypography,
         content = content
+    )
+}
+
+/** 内置 CJK 字体：部分设备系统字体链在本 App 进程内拿不到中文字形（豆腐块），
+ *  因此把 Noto Sans SC（OFL 授权）打进 APK，全 App 统一使用。 */
+val FontCJK = FontFamily(Font(R.font.notosanssc))
+
+private val AppTypography: Typography = run {
+    val d = Typography()
+    Typography(
+        displayLarge = d.displayLarge.copy(fontFamily = FontCJK),
+        displayMedium = d.displayMedium.copy(fontFamily = FontCJK),
+        displaySmall = d.displaySmall.copy(fontFamily = FontCJK),
+        headlineLarge = d.headlineLarge.copy(fontFamily = FontCJK),
+        headlineMedium = d.headlineMedium.copy(fontFamily = FontCJK),
+        headlineSmall = d.headlineSmall.copy(fontFamily = FontCJK),
+        titleLarge = d.titleLarge.copy(fontFamily = FontCJK),
+        titleMedium = d.titleMedium.copy(fontFamily = FontCJK),
+        titleSmall = d.titleSmall.copy(fontFamily = FontCJK),
+        bodyLarge = d.bodyLarge.copy(fontFamily = FontCJK),
+        bodyMedium = d.bodyMedium.copy(fontFamily = FontCJK),
+        bodySmall = d.bodySmall.copy(fontFamily = FontCJK),
+        labelLarge = d.labelLarge.copy(fontFamily = FontCJK),
+        labelMedium = d.labelMedium.copy(fontFamily = FontCJK),
+        labelSmall = d.labelSmall.copy(fontFamily = FontCJK),
     )
 }
