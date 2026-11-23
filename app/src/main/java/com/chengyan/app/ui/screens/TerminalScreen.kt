@@ -18,6 +18,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
+import com.chengyan.app.ui.components.monoSafe
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
@@ -159,7 +160,7 @@ fun TerminalScreen(onBack: () -> Unit) {
                 value = input,
                 onValueChange = { input = it },
                 singleLine = true,
-                textStyle = TextStyle(color = TermFg, fontFamily = FontFamily.Monospace, fontSize = 14.sp),
+                textStyle = TextStyle(color = TermFg, fontFamily = monoSafe(input), fontSize = 14.sp),
                 cursorBrush = SolidColor(AccentInk),
                 modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),

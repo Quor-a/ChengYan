@@ -222,7 +222,7 @@ private fun CodeBlock(lang: String, code: String) {
         }
         Text(
             code,
-            fontFamily = FontFamily.Monospace,
+            fontFamily = monoSafe(code),
             fontSize = 12.sp,
             lineHeight = 19.sp,
             color = CodeFg,
@@ -319,7 +319,7 @@ fun buildAnnotated(spans: List<MdSpan>): AnnotatedString {
                 is MdSpan.Bold -> withStyle(SpanStyle(fontWeight = FontWeight.Bold)) { append(s.inner) }
                 is MdSpan.Italic -> withStyle(SpanStyle(fontStyle = FontStyle.Italic)) { append(s.inner) }
                 is MdSpan.Code -> withStyle(androidx.compose.ui.text.SpanStyle(
-                    fontFamily = FontFamily.Monospace,
+                    fontFamily = monoSafe(s.inner),
                     fontSize = 13.sp,
                     background = Paper3,
                     color = AccentInk
@@ -333,3 +333,9 @@ fun buildAnnotated(spans: List<MdSpan>): AnnotatedString {
     }
 }
 
+
+/** Android 默认等宽字体（Droid Sans Mono）不含 CJK 字形，中文会渲染成豆腐块；
+ *  文本含 CJK 时回退到默认字体（Roboto 自带 CJK 回退链）。 */
+fun monoSafe(text: String) =
+    if (text.any { it.code in 0x2E80..0x9FFF || it.code in 0xF900..0xFAFF || it.code in 0xFF00..0xFFEF })
+        FontFamily.Default else FontFamily.Monospace
