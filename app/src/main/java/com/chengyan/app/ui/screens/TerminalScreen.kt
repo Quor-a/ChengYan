@@ -107,9 +107,8 @@ fun TerminalScreen(onBack: () -> Unit) {
                     text.ifBlank {
                         "澄言 Linux · 进程内 busybox（ARM64 二进制翻译，无 root）\n输入命令回车执行。试：ls / 或 echo hello"
                     },
-                    fontFamily = FontFamily.Monospace,
                     fontSize = 12.sp,
-                    lineHeight = 17.sp,
+                    lineHeight = 18.sp,
                     color = TermFg,
                     modifier = Modifier.verticalScroll(outScroll).padding(12.dp)
                 )

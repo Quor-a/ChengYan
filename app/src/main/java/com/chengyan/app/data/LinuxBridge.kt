@@ -13,6 +13,7 @@ object LinuxBridge {
         val busy: Boolean = false,
         val exit: Int? = null,
         val output: String = "",
+        val outputLen: Int = 0,
     )
 
     private val machine = AtomicLong(0)
@@ -92,6 +93,7 @@ object LinuxBridge {
         val busy = json.contains("\"busy\":true")
         val exit = Regex("\"exit\":(-?\\d+)").find(json)?.let { it.groupValues[1].toIntOrNull() }
         val out = Regex("\"output\":\"(.*)\"\\s*$", RegexOption.DOT_MATCHES_ALL).find(json)?.let { it.groupValues[1] } ?: ""
+        val outLen = Regex("\"len\":(\\d+)").find(json)?.let { it.groupValues[1].toIntOrNull() } ?: 0
         val sb = StringBuilder(out.length)
         var i = 0
         while (i < out.length) {
@@ -112,6 +114,6 @@ object LinuxBridge {
                 }
             } else { sb.append(c); i++ }
         }
-        return State(busy, exit, sb.toString())
+        return State(busy, exit, sb.toString(), outLen)
     }
 }
