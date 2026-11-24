@@ -38,6 +38,7 @@ object LinuxBridge {
             }
             busy.setExecutable(true)
         }
+        Rootfs.ensure(ctx!!)
         return d
     }
 
@@ -92,28 +93,41 @@ object LinuxBridge {
     private fun parseState(json: String): State {
         val busy = json.contains("\"busy\":true")
         val exit = Regex("\"exit\":(-?\\d+)").find(json)?.let { it.groupValues[1].toIntOrNull() }
-        val out = Regex("\"output\":\"(.*)\"\\s*$", RegexOption.DOT_MATCHES_ALL).find(json)?.let { it.groupValues[1] } ?: ""
+        // output 是 JSON 最后一个字段（其后只有收尾的 "}"），贪婪匹配到最后一个引号即可。
+        // 旧写法 "\"output\":\"(.*)\"\\s*$" 因结尾的 "}" 永不匹配，导致 output 恒为空
+        // （模型侧只看到 len 字节数的根因）。
+        val out = Regex("\"output\":\"(.*)\"", RegexOption.DOT_MATCHES_ALL).find(json)?.let { it.groupValues[1] } ?: ""
         val outLen = Regex("\"len\":(\\d+)").find(json)?.let { it.groupValues[1].toIntOrNull() } ?: 0
-        val sb = StringBuilder(out.length)
+        // native 侧把非 ASCII 字节逐个写成 \u00XX（UTF-8 每字节独立转义），
+        // 必须按字节重组后再按 UTF-8 解码，中文等多字节文本才不会变乱码。
+        val bytes = java.io.ByteArrayOutputStream(out.length)
         var i = 0
         while (i < out.length) {
             val c = out[i]
             if (c == '\\' && i + 1 < out.length) {
                 when (val n = out[i + 1]) {
-                    'n' -> { sb.append('\n'); i += 2 }
-                    'r' -> { sb.append('\r'); i += 2 }
-                    't' -> { sb.append('\t'); i += 2 }
-                    '"' -> { sb.append('"'); i += 2 }
-                    '\\' -> { sb.append('\\'); i += 2 }
+                    'n' -> { bytes.write(0x0A); i += 2 }
+                    'r' -> { bytes.write(0x0D); i += 2 }
+                    't' -> { bytes.write(0x09); i += 2 }
+                    '"' -> { bytes.write(0x22); i += 2 }
+                    '\\' -> { bytes.write(0x5C); i += 2 }
                     'u' -> {
                         val hex = out.getOrNull(i + 2)?.let { out.substring(i + 2, (i + 6).coerceAtMost(out.length)) }
                         val v = hex?.toIntOrNull(16)
-                        if (v != null && hex?.length == 4) { sb.append(v.toChar()); i += 6 } else { sb.append(n); i += 2 }
+                        when {
+                            v != null && hex?.length == 4 -> {
+                                // native 逐字节转义：\u00XX 即原字节；≥0x100 的码点按 UTF-8 写入兜底
+                                if (v in 0x00..0xFF) bytes.write(v)
+                                else bytes.write(String(Character.toChars(v)).toByteArray(Charsets.UTF_8))
+                                i += 6
+                            }
+                            else -> { bytes.write(n.code); i += 2 }
+                        }
                     }
-                    else -> { sb.append(n); i += 2 }
+                    else -> { bytes.write(n.code); i += 2 }
                 }
-            } else { sb.append(c); i++ }
+            } else bytes.write(c.code)
         }
-        return State(busy, exit, sb.toString(), outLen)
+        return State(busy, exit, String(bytes.toByteArray(), Charsets.UTF_8), outLen)
     }
 }

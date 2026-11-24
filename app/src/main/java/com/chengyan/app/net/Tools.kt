@@ -161,15 +161,25 @@ object LinuxTool {
 
     private fun format(task: Long, s: LinuxBridge.State): String {
         val head = if (task > 0) "任务 $task 已启动。" else ""
-        val status = if (s.busy) "状态：运行中" else "状态：已退出（code=${s.exit}）"
-        val body = if (s.output.isBlank())
-            "（无 stdout 输出" + (if (s.outputLen > 0) "，但缓冲有 ${s.outputLen} 字节——终端页可见" else "；命令可能只做了重定向/副作用，退出码 $s.exit）") + "）"
-        else {
-            val o = s.output
-            if (o.length > MAX_OUTPUT_CHARS) "…[截断]\n" + o.takeLast(MAX_OUTPUT_CHARS) else o
+        val status = if (s.busy) "状态：运行中" else "状态：已退出（exit code=${s.exit}）"
+        // 终端序列（颜色/光标控制等）对模型无意义，剥离后再给文本
+        val text = stripAnsi(s.output)
+        val body = when {
+            text.isNotBlank() ->
+                if (text.length > MAX_OUTPUT_CHARS) "…[截断，仅显示末尾 ${MAX_OUTPUT_CHARS} 字符]\n" + text.takeLast(MAX_OUTPUT_CHARS)
+                else text
+            s.outputLen > 0 -> "（输出缓冲有 ${s.outputLen} 字节，但解不出可显示文本——可能全是控制序列/二进制；终端页可见）"
+            else -> "（无输出；命令可能只做了重定向/副作用，exit code=${s.exit}）"
         }
-        return "$head\n$status\n输出：\n$body"
+        return "$head\n$status\n输出（stdout 与 stderr 合并）:\n$body"
     }
+
+    /** 剥离 ANSI/VT100 转义序列：CSI 序列、OSC 及其他 ESC 引导的控制序列。 */
+    private fun stripAnsi(s: String): String = s
+        .replace(Regex("\u001B\\[[0-9;?]*[ -/]*[@-~]"), "")   // CSI（颜色、光标等）
+        .replace(Regex("\u001B\\][^\u0007\u001B]*(\u0007|\u001B\\\\)"), "") // OSC
+        .replace(Regex("\u001B[@-_]"), "")                    // 其余单字符转义
+        .replace("\r", "")
 }
 
 /** 递归下降算术表达式求值（+ - * / % ^ 和括号），无外部依赖。 */
