@@ -18,7 +18,7 @@ object Rootfs {
             root.deleteRecursively()
             root.mkdirs()
             ctx.assets.open("rootfs.tar.gz").use { gz ->
-                java.util.zip.GZIPInputStream(gz).use { tar ->
+                java.io.DataInputStream(java.util.zip.GZIPInputStream(gz)).use { tar ->
                     val hdr = ByteArray(512)
                     var pendingLong: String? = null
                     while (true) {
