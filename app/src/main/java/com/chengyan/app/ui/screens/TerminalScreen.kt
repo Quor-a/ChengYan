@@ -54,6 +54,8 @@ fun TerminalScreen(onBack: () -> Unit) {
     var error by remember { mutableStateOf<String?>(null) }
     var follow by remember { mutableStateOf(true) }
     var clearAt by remember { mutableStateOf(0) } // 清屏游标（本地显示截断）
+    var probeOut by remember { mutableStateOf<String?>(null) } // FD-OS S0 探针结果
+    val ctx = androidx.compose.ui.platform.LocalContext.current
     val outScroll = rememberScrollState()
 
     // 150ms 轮询 native 输出（会话全局唯一，终端页与 linux 工具共享同一状态）
@@ -104,7 +106,7 @@ fun TerminalScreen(onBack: () -> Unit) {
         // 输出区
         Box(Modifier.weight(1f).fillMaxWidth().padding(horizontal = 10.dp)) {
             Surface(color = TermBg, shape = RoundedCornerShape(14.dp), modifier = Modifier.fillMaxSize()) {
-                val text = renderOut(st.output.drop(clearAt), st.busy, st.exit)
+                val text = (probeOut?.let { it + "\n\n" } ?: "") + renderOut(st.output.drop(clearAt), st.busy, st.exit)
                 Text(
                     text.ifBlank {
                         "澄言 Linux · 进程内 busybox（ARM64 二进制翻译，无 root）\n输入命令回车执行。试：ls / 或 echo hello"
@@ -151,6 +153,17 @@ fun TerminalScreen(onBack: () -> Unit) {
             QuickKey("^C") { LinuxBridge.restart(); clearAt = 0 }
             Spacer(Modifier.weight(1f))
             QuickKey("重建") { LinuxBridge.restart(); clearAt = 0 }
+            Spacer(Modifier.width(8.dp))
+            QuickKey("探针") {
+                probeOut = "探测中…"
+                Thread {
+                    probeOut = try {
+                        com.chengyan.app.data.FdosProbe.summarize(
+                            com.chengyan.app.data.FdosProbe.run(ctx)
+                        )
+                    } catch (e: Throwable) { "探针失败：${e.message}" }
+                }.start()
+            }
         }
         // 输入行
         Row(
