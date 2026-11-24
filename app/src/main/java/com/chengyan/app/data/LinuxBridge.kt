@@ -167,7 +167,7 @@ object LinuxBridge {
                     }
                     else -> { bytes.write(n.code); i += 2 }
                 }
-            } else bytes.write(c.code)
+            } else { bytes.write(c.code); i += 1 }
         }
         return State(busy, exit, String(bytes.toByteArray(), Charsets.UTF_8), outLen)
     }
