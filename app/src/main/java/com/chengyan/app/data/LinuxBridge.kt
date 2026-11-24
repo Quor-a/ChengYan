@@ -90,6 +90,7 @@ object LinuxBridge {
         }
         val s = try { parseState(json) } catch (t: Throwable) {
             State(output = "[ch-diag] parseState 异常 ${t::class.simpleName}: ${t.message}\n" +
+                "sizes: $diagSizes\n" +
                 t.stackTraceToString().take(4000) + "\nheap: used=${usedHeap()}")
         }
         state.set(s)
@@ -97,6 +98,8 @@ object LinuxBridge {
     }
 
     private fun usedHeap(): String = diagHeap()
+
+    @Volatile private var diagSizes: String = ""
 
     /** 诊断信息：Java 堆 / native 占用（真机 OOM 定位用）。 */
     fun diagHeap(): String = try {
@@ -121,11 +124,21 @@ object LinuxBridge {
     private fun parseState(json: String): State {
         val busy = json.contains("\"busy\":true")
         val exit = Regex("\"exit\":(-?\\d+)").find(json)?.let { it.groupValues[1].toIntOrNull() }
-        // output 是 JSON 最后一个字段（其后只有收尾的 "}"），贪婪匹配到最后一个引号即可。
-        // 旧写法 "\"output\":\"(.*)\"\\s*$" 因结尾的 "}" 永不匹配，导致 output 恒为空
-        // （模型侧只看到 len 字节数的根因）。
-        val out = Regex("\"output\":\"(.*)\"", RegexOption.DOT_MATCHES_ALL).find(json)?.let { it.groupValues[1] } ?: ""
         val outLen = Regex("\"len\":(\\d+)").find(json)?.let { it.groupValues[1].toIntOrNull() } ?: 0
+        // output 是 JSON 最后一个字段：用 indexOf 有界提取，硬上限 2MB——
+        // 贪婪正则 + groupValues 在异常大 json 上会产生巨型字符串拷贝（真机 OOM 268435472 的直接嫌疑）。
+        val out = run {
+            val key = "\"output\":\""
+            val s0 = json.indexOf(key)
+            if (s0 < 0) "" else {
+                val s = s0 + key.length
+                val e = json.lastIndexOf('"').coerceAtLeast(s)
+                val raw = json.substring(s, e)
+                if (raw.length > 2 * 1024 * 1024) raw.takeLast(2 * 1024 * 1024) else raw
+            }
+        }
+        // json/out 尺寸随诊断输出（OOM 定位用）
+        diagSizes = "json=${json.length} out=${out.length}"
         // native 侧把非 ASCII 字节逐个写成 \u00XX（UTF-8 每字节独立转义），
         // 必须按字节重组后再按 UTF-8 解码，中文等多字节文本才不会变乱码。
         val bytes = java.io.ByteArrayOutputStream(out.length)
