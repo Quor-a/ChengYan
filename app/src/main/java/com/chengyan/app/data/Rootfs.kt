@@ -17,8 +17,21 @@ object Rootfs {
         try {
             root.deleteRecursively()
             root.mkdirs()
-            ctx.assets.open("rootfs.tar.gz").use { gz ->
-                java.io.DataInputStream(java.util.zip.GZIPInputStream(gz)).use { tar ->
+            // AGP 8.x 会把 assets 里的 .gz 解压后改名打包(rootfs.tar.gz → assets/rootfs.tar)，
+            // 所以按实际存在的名字取，并按魔数自动识别是否 gzip（Pushback 回退字节）。
+            val (stream, isGzip) = sequenceOf("rootfs.tar.gz", "rootfs.tar").mapNotNull { name ->
+                try {
+                    val s = java.io.PushbackInputStream(ctx.assets.open(name), 2)
+                    val magic = ByteArray(2)
+                    val n = s.read(magic)
+                    val gz = n == 2 && magic[0] == 0x1f.toByte() && magic[1] == 0x8b.toByte()
+                    if (!gz) s.unread(magic, 0, n)
+                    s to gz
+                } catch (e: Exception) { null }
+            }.firstOrNull() ?: return false
+            val base = if (isGzip) java.util.zip.GZIPInputStream(stream) else stream
+            base.use { raw ->
+                java.io.DataInputStream(raw).use { tar ->
                     val hdr = ByteArray(512)
                     var pendingLong: String? = null
                     while (true) {
