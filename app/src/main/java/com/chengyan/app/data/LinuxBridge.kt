@@ -96,7 +96,10 @@ object LinuxBridge {
         return s
     }
 
-    private fun usedHeap(): String = try {
+    private fun usedHeap(): String = diagHeap()
+
+    /** 诊断信息：Java 堆 / native 占用（真机 OOM 定位用）。 */
+    fun diagHeap(): String = try {
         val rt = android.os.Debug.MemoryInfo()
         android.os.Debug.getMemoryInfo(rt)
         "javaHeap=${rt.dalvikPrivateDirty}KB native=${rt.nativePrivateDirty}KB"

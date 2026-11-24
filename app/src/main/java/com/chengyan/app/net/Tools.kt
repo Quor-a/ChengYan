@@ -154,8 +154,10 @@ object LinuxTool {
                     else "重建失败"
                 else -> "未知 action：$action（可用：run / poll / wait / restart）"
             }
-        } catch (e: Exception) {
-            "linux 工具出错：${e.message}"
+        } catch (e: Throwable) {
+            val st = if (e is OutOfMemoryError || e is StackOverflowError)
+                "\n" + e.stackTraceToString().take(3000) + "\n" + LinuxBridge.diagHeap() else ""
+            "linux 工具出错：${e::class.simpleName} ${e.message}$st"
         }
     }
 
