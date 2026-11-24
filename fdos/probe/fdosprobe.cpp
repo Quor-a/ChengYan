@@ -79,6 +79,34 @@ static void record(const char *name, Pres r, int err, long t0, const char *note)
 // 在 fork 子进程里跑的探针体：返回 0=成功，>0=失败原因（errno）
 typedef int (*probe_fn)(void);
 
+#include "fdos_interp_blob.h"
+
+// INTERP_FD：ELF PT_INTERP 指向 /proc/self/fd/N 的真实加载链
+// (musl ld.so 进 memfd 固定到 fd77,主程序 apk 进 memfd,execveat(AT_EMPTY_PATH))
+static int p_interp_fd(void) {
+    int lfd = (int)syscall(__NR_memfd_create, "fdos-ld", (unsigned long)0);
+    if (lfd < 0) return errno == ENOSYS ? -1 : errno;
+    if (write(lfd, fdos_ld_blob, fdos_ld_blob_len) != (ssize_t)fdos_ld_blob_len) { int e = errno; close(lfd); return e; }
+    if (lfd != 77) { if (dup2(lfd, 77) < 0) { int e = errno; close(lfd); return e; } close(lfd); }
+    fchmod(77, 0700);
+    int efd = (int)syscall(__NR_memfd_create, "fdos-apk", (unsigned long)0);
+    if (efd < 0) return errno;
+    if (write(efd, fdos_apk_blob, fdos_apk_blob_len) != (ssize_t)fdos_apk_blob_len) { int e = errno; close(efd); return e; }
+    fchmod(efd, 0700);
+    lseek(efd, 0, SEEK_SET);
+    pid_t pid = fork();
+    if (pid == 0) {
+        char *argv[] = {"apk", "--version", NULL};
+        char *envp[] = {NULL};
+        syscall(__NR_execveat, (long)efd, "", argv, envp, (unsigned long)AT_EMPTY_PATH);
+        _exit(errno == EACCES ? 101 : errno == EPERM ? 102 : 103);
+    }
+    int st; waitpid(pid, &st, 0);
+    close(efd); close(77);
+    if (WIFEXITED(st) && WEXITSTATUS(st) == 0) return 0;
+    return WIFEXITED(st) ? (WEXITSTATUS(st) - 100) : EACCES;
+}
+
 // 子进程统一入口：不允许子进程逃逸，exit 码即结果
 static int run_child(probe_fn fn, int timeout_ms) {
     pid_t pid = fork();
@@ -313,8 +341,12 @@ static void run_all(const char *datadir, const char *libdir, int debug_appdata) 
         record("APPDATA_EXEC", P_UNKNOWN, 0, t0, "跳过（capmap.debug 未开）");
     }
 
-    record("INTERP_FD", P_UNKNOWN, 0, now_ms(), "待 S0.2：需 musl ld.so 探针（PT_INTERP=/proc/self/fd/N）");
-    record("VPN_TUN", P_UNKNOWN, 0, now_ms(), "待 UI 授权实测（VpnService.establish）");
+    t0 = now_ms();
+    r = run_child(p_interp_fd, 3000);
+    record("INTERP_FD", r == 0 ? P_OK : (r == -1 ? P_ENOSYS : P_DENIED), r == 0 ? 0 : errno, t0,
+           r == 0 ? "PT_INTERP=/proc/self/fd/77 经 musl ld.so 加载动态 ELF 成功(apk --version)"
+                  : "内核/SELinux 拒 anon_inode exec 或 ld.so 失败→降级用户态装载器");
+    // VPN_TUN 由 Kotlin 层注入（VpnService.prepare 需 Context，native 侧无）
 }
 
 static char g_json[8192];

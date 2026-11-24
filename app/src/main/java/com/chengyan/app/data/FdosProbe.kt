@@ -18,10 +18,17 @@ object FdosProbe {
         val dir = context.applicationInfo.nativeLibraryDir
         val files = context.filesDir.absolutePath
         val json = runAll(files, dir, debugAppdata)
+        // VPN_TUN 位（表3）：prepare() 不弹窗；null=已授权,非 null=需用户同意
+        val vpn = runCatching {
+            val intent = android.app.VpnService.prepare(context)
+            if (intent == null) "\"name\":\"VPN_TUN\",\"result\":\"ok\",\"ms\":0,\"note\":\"VpnService 已授权（establish 可得 tun fd）\""
+            else "\"name\":\"VPN_TUN\",\"result\":\"consent\",\"ms\":0,\"note\":\"需用户在 UI 授权 VpnService（establish 时弹窗）\""
+        }.getOrNull() ?: "\"name\":\"VPN_TUN\",\"result\":\"denied\",\"ms\":0,\"note\":\"VpnService 不可用\""
+        val merged = json.trimEnd().trimEnd('}') + ",$vpn]}"
         runCatching {
-            File(files, "capmap.json").writeText(json)
+            File(files, "capmap.json").writeText(merged)
         }
-        return json
+        return merged
     }
 
     /** 把 JSON 转成可读摘要（探针名 结果 耗时 备注）。 */
