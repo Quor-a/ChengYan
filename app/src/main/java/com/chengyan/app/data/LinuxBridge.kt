@@ -60,22 +60,47 @@ object LinuxBridge {
         if (ctx == null) throw IllegalStateException("LinuxBridge.init 未调用")
     }
 
-    /** 启动命令；返回任务号（-3 = 忙）。 */
+    /** 启动命令；返回任务号（-3 = 忙）。异常时写诊断到状态缓存。 */
     fun run(cmd: String): Long {
-        val m = ensure()
+        val m = try { ensure() } catch (t: Throwable) {
+            state.set(State(output = "[ch-diag] ensure 异常 ${t::class.simpleName}: ${t.message}\n" +
+                t.stackTraceToString().take(4000) + "\nheap: used=${usedHeap()}"))
+            return -10
+        }
         if (m <= 0) return -10
-        return LinuxNative.exec(m, cmd)
+        return try { LinuxNative.exec(m, cmd) } catch (t: Throwable) {
+            state.set(State(output = "[ch-diag] exec 异常 ${t::class.simpleName}: ${t.message}\n" +
+                t.stackTraceToString().take(4000) + "\nheap: used=${usedHeap()}"))
+            -11
+        }
     }
 
-    /** 轮询并刷新本地状态缓存。 */
+    /** 轮询并刷新本地状态缓存。OOM/异常时把 Java 调用栈写进输出（终端页可见），便于真机定位。 */
     fun poll(): State {
         val m = machine.get()
         if (m <= 0) return state.get()
-        val json = LinuxNative.poll(m) ?: return state.get()
-        val s = parseState(json)
+        val json = try { LinuxNative.poll(m) } catch (t: Throwable) {
+            val s = State(output = "[ch-diag] poll 异常 ${t::class.simpleName}: ${t.message}\n" +
+                t.stackTraceToString().take(4000) + "\nheap: used=${usedHeap()}")
+            state.set(s); return s
+        } ?: return state.get()
+        if (json.length > 8 * 1024 * 1024) {
+            val s = State(output = "[ch-diag] poll JSON ${json.length} 字符超限，跳过解析。heap: used=${usedHeap()}")
+            state.set(s); return s
+        }
+        val s = try { parseState(json) } catch (t: Throwable) {
+            State(output = "[ch-diag] parseState 异常 ${t::class.simpleName}: ${t.message}\n" +
+                t.stackTraceToString().take(4000) + "\nheap: used=${usedHeap()}")
+        }
         state.set(s)
         return s
     }
+
+    private fun usedHeap(): String = try {
+        val rt = android.os.Debug.MemoryInfo()
+        android.os.Debug.getMemoryInfo(rt)
+        "javaHeap=${rt.dalvikPrivateDirty}KB native=${rt.nativePrivateDirty}KB"
+    } catch (e: Exception) { "?" }
 
     fun current(): State = state.get()
 
