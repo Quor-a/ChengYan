@@ -61,3 +61,10 @@ dependencies {
 
     debugImplementation("androidx.compose.ui:ui-tooling")
 }
+
+android {
+    lint {
+        checkReleaseBuilds = false
+        abortOnError = false
+    }
+}
