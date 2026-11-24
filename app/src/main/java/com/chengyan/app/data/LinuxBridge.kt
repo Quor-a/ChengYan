@@ -139,8 +139,11 @@ object LinuxBridge {
         }
         // json/out 尺寸随诊断输出（OOM 定位用）
         diagSizes = "json=${json.length} out=${out.length}"
-        // native 侧把非 ASCII 字节逐个写成 \u00XX（UTF-8 每字节独立转义），
-        // 必须按字节重组后再按 UTF-8 解码，中文等多字节文本才不会变乱码。
+        return State(busy, exit, decodeOutput(out), outLen)
+    }
+
+    /** JSON 转义输出 → 原始字节 → UTF-8 文本。纯函数，JVM 单元测试覆盖。 */
+    internal fun decodeOutput(out: String): String {
         val bytes = java.io.ByteArrayOutputStream(out.length)
         var i = 0
         while (i < out.length) {
@@ -169,6 +172,6 @@ object LinuxBridge {
                 }
             } else { bytes.write(c.code); i += 1 }
         }
-        return State(busy, exit, String(bytes.toByteArray(), Charsets.UTF_8), outLen)
+        return String(bytes.toByteArray(), Charsets.UTF_8)
     }
 }
