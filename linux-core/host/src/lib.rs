@@ -262,4 +262,22 @@ mod tests {
     fn tokenize_quotes() {
         assert_eq!(tokenize("echo 'a b' \"c d\"e plain"), vec!["echo", "a b", "c de", "plain"]);
     }
+
+    #[test]
+    #[ignore] // 依赖 /tmp/busybox 与 /tmp/jail（桌面沙盒真值验证用）
+    fn session_run_real_busybox() {
+        let s = Session::new(std::path::Path::new("/tmp/busybox"), std::path::Path::new("/tmp/jail")).unwrap();
+        let out: SharedOut = Arc::new(Mutex::new(Vec::new()));
+        let code = s.run(&["busybox".into(), "cat".into(), "/etc/os-release".into()], &out).unwrap();
+        let txt = String::from_utf8_lossy(&out.lock().unwrap()).into_owned();
+        assert_eq!(code, 0);
+        assert!(txt.contains("PRETTY_NAME"), "got: {txt}");
+        // 越狱防护：root 外的路径读不到
+        let out2: SharedOut = Arc::new(Mutex::new(Vec::new()));
+        std::fs::write("/tmp/escape_probe.txt", b"ESCAPE").unwrap(); // jail 外探针
+        let c2 = s.run(&["busybox".into(), "cat".into(), "/tmp/escape_probe.txt".into()], &out2).unwrap();
+        let t2 = String::from_utf8_lossy(&out2.lock().unwrap()).into_owned();
+        assert_ne!(c2, 0, "jail escape must fail");
+        assert!(!t2.contains("ESCAPE"));
+    }
 }

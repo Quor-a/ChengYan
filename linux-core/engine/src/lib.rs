@@ -18,12 +18,21 @@ pub struct Cpu {
     pub sp: u64,
     pub pc: u64,
     pub nzcv: u32,
+    /// guest 侧 TLS 基址（mrs/msr tpidr_el0；内核在建线程时注入）
+    pub tpidr: u64,
+    /// 近似单调计数（cntvct_el0 读数；P3 换真实时钟）
+    pub counter: u64,
+    /// SIMD/FP 寄存器 v0..v31（128 位；P2 只实现 memset/memcpy 热路径所需，
+    /// P4 同 ISA host 上换原生执行）
+    pub q: [u128; 32],
 }
 
 impl Cpu {
     pub fn new() -> Self {
-        Self { x: [0; 31], sp: 0, pc: 0, nzcv: 0 }
+        Self { x: [0; 31], sp: 0, pc: 0, nzcv: 0, tpidr: 0, counter: 0, q: [0; 32] }
     }
+    pub fn lr(&self) -> u64 { self.x[30] }
+    pub fn set_lr(&mut self, v: u64) { self.x[30] = v; }
 }
 
 /// 执行环境：把「取指」与「内存访问」抽象出来，kernel 侧的 flat 内存与

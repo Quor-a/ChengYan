@@ -80,7 +80,31 @@ fun MessageBubble(
     var showActivity by remember { mutableStateOf(false) }
     // 思考全量弹层 / 工具详情弹层
     var thinkOpen by remember { mutableStateOf(false) }
-    var toolDetail by remember { mutableStateOf<ToolCallInfo?>(null) }
+    var detailEntry by remember { mutableStateOf<com.chengyan.app.ui.components.ActivityEntry?>(null) }
+    // 活动流条目（思考 + 工具，真实时序混排，ZorvAI ActivityEntry 语义）
+    val activityEntries = remember(message.toolCalls.size, message.thinking) {
+        buildList {
+            if (message.thinking.isNotBlank()) {
+                add(ActivityEntry(
+                    category = ActivityCat.THINK,
+                    title = if (message.thinkingMs >= 1000) "思考了 ${formatDurationMs(message.thinkingMs)}" else "思考",
+                    result = message.thinking,
+                    durationMs = message.thinkingMs,
+                ))
+            }
+            message.toolCalls.forEach { t ->
+                val cat = activityCategoryOf(t.name)
+                add(ActivityEntry(
+                    category = cat,
+                    title = resolveActivityTitle(cat, t.name, t.arguments),
+                    toolName = t.name,
+                    args = t.arguments,
+                    result = t.result.takeIf { it.isNotBlank() },
+                    failed = detectResultFailed(t.result),
+                ))
+            }
+        }
+    }
     val haptic = androidx.compose.ui.platform.LocalHapticFeedback.current
 
     // 头像悬浮布局（ZorvAI）：28dp 头像 → 名字行下移 3dp 对齐中线，正文再留 10dp
@@ -132,21 +156,20 @@ fun MessageBubble(
                         containerColor = Accent.copy(alpha = 0.12f),
                     ) {
                         Text(
-                            "${if (showActivity) "收起" else "· ${message.toolCalls.size} 工具"}",
+                            "${if (showActivity) "收起" else "· ${message.toolCalls.size} 工具" + (if (message.thinking.isNotBlank()) " · 思考" else "")}",
                             fontSize = 9.sp, color = AccentInk,
                         )
                     }
                 }
             }
 
-            // ── 活动流：工具逐条明细（默认收起，失败染红，点击看详情）──
-            if (showActivity && message.toolCalls.isNotEmpty()) {
-                Column(Modifier.fillMaxWidth().padding(start = avatarIndent)) {
-                    message.toolCalls.forEach { t ->
-                        ActivityRow(t) { toolDetail = t }
-                        Spacer(Modifier.height(4.dp))
-                    }
-                }
+            // ── 活动流（ZorvAI ActivityStreamView 同构：汇总行 + 逐条明细 + 详情弹层）──
+            if (showActivity && activityEntries.isNotEmpty()) {
+                ActivityStreamView(
+                    entries = activityEntries,
+                    onOpenEntry = { e -> if (e.isThink) thinkOpen = true else detailEntry = e },
+                    modifier = Modifier.padding(start = avatarIndent),
+                )
                 Spacer(Modifier.height(6.dp))
             }
 
@@ -232,24 +255,9 @@ fun MessageBubble(
         )
     }
 
-    // 工具详情弹层（ZorvAI 活动详情弹层语义）
-    toolDetail?.let { t ->
-        AlertDialog(
-            onDismissRequest = { toolDetail = null },
-            title = { Text(toolLabel(t.name), fontFamily = FontFamily.Serif, fontWeight = FontWeight.SemiBold) },
-            text = {
-                Column {
-                    Text("参数", fontSize = 12.sp, color = Ink3, fontWeight = FontWeight.SemiBold)
-                    Text(t.arguments.ifBlank { "{}" }, fontFamily = FontFamily.Monospace, fontSize = 11.sp, color = Ink2,
-                        modifier = Modifier.fillMaxWidth().padding(top = 2.dp))
-                    Spacer(Modifier.height(10.dp))
-                    Text("结果", fontSize = 12.sp, color = Ink3, fontWeight = FontWeight.SemiBold)
-                    Text(t.result.ifBlank { "（执行中…）" }, fontFamily = FontFamily.Monospace, fontSize = 11.sp, color = Ink2,
-                        modifier = Modifier.fillMaxWidth().padding(top = 2.dp).heightIn(max = 260.dp).verticalScroll(rememberScrollState()))
-                }
-            },
-            confirmButton = { TextButton(onClick = { toolDetail = null }) { Text("关闭", color = Ink2) } },
-        )
+    // 工具/思考详情弹层（ZorvAI ActivityDetailSheet 同构：按类别分派渲染）
+    detailEntry?.let { e ->
+        ActivityDetailSheet(entry = e, onDismiss = { detailEntry = null })
     }
 }
 
@@ -341,6 +349,44 @@ private fun ThinkFoldRow(durationMs: Long, onClick: () -> Unit) {
         Text(label, fontSize = 13.sp, color = cs.onSurface.copy(alpha = 0.72f))
         Spacer(Modifier.width(3.dp))
         Text("›", fontSize = 12.sp, color = cs.onSurface.copy(alpha = 0.45f))
+    }
+}
+
+/** 思考折叠行（ZorvAI ThinkFoldRow：✦ 思考了 Ns ›）。 */
+@Composable
+private fun ThinkFoldRow(durationMs: Long, onClick: () -> Unit) {
+    val label = if (durationMs >= 1000) "思考了 ${formatDurationMs(durationMs)}" else "思考过程"
+    Row(
+        Modifier.fillMaxWidth()
+            .clip(RoundedCornerShape(6.dp))
+            .clickable(onClick = onClick)
+            .padding(vertical = 3.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text("✦", fontSize = 12.sp, color = Accent)
+        Spacer(Modifier.width(6.dp))
+        Text(label, fontSize = 13.sp, color = Ink.copy(alpha = 0.82f))
+        Spacer(Modifier.width(4.dp))
+        Text("›", fontSize = 12.sp, color = Ink4)
+    }
+}
+
+/** 思考折叠行（ZorvAI ThinkFoldRow：✦ 思考了 Ns ›）。 */
+@Composable
+private fun ThinkFoldRow(durationMs: Long, onClick: () -> Unit) {
+    val label = if (durationMs >= 1000) "思考了 ${formatDurationMs(durationMs)}" else "思考过程"
+    Row(
+        Modifier.fillMaxWidth()
+            .clip(RoundedCornerShape(6.dp))
+            .clickable(onClick = onClick)
+            .padding(vertical = 3.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text("✦", fontSize = 12.sp, color = Accent)
+        Spacer(Modifier.width(6.dp))
+        Text(label, fontSize = 13.sp, color = Ink.copy(alpha = 0.82f))
+        Spacer(Modifier.width(4.dp))
+        Text("›", fontSize = 12.sp, color = Ink4)
     }
 }
 

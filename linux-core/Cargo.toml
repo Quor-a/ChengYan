@@ -1,5 +1,5 @@
 [workspace]
-members = ["kernel", "engine", "host", "jnihost", "runner"]
+members = ["kernel", "engine", "runner"]
 resolver = "2"
 
 [profile.dev]

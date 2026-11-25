@@ -1,6 +1,20 @@
 package com.chengyan.app.data
 
 import kotlinx.serialization.Serializable
+import java.util.concurrent.atomic.AtomicLong
+
+/** 唯一 id 生成器：时间戳*1000 + 进程内递增序号，杜绝同一毫秒创建两条数据时 id 撞车（LazyColumn key 冲突闪退）。 */
+object IdGen {
+    private val seq = AtomicLong(0)
+    fun next(): Long = System.currentTimeMillis() * 1000 + (seq.incrementAndGet() % 1000)
+}
+import java.util.concurrent.atomic.AtomicLong
+
+/** 唯一 id 生成器：时间戳*1000 + 进程内递增序号，杜绝同一毫秒创建两条数据时 id 撞车（LazyColumn key 冲突闪退）。 */
+object IdGen {
+    private val seq = AtomicLong(0)
+    fun next(): Long = System.currentTimeMillis() * 1000 + (seq.incrementAndGet() % 1000)
+}
 
 @Serializable
 data class ModelConfig(
@@ -13,6 +27,12 @@ data class ModelConfig(
     // ---- 移植自 ZorvAI QuroModelConfig 的生成控制 ----
     val providerType: String = "OPENAI_GENERIC",  // ApiProviderType 枚举名
     val maxTokens: Int = 65536,                    // 输出 token 上限
+    val enableTools: Boolean = true,               // 工具调用总开关
+    val contextWindow: Int = 131072                // 上下文预算（估算 token），历史超限时从最旧裁剪，保留 system
+) {
+    val configured: Boolean get() = url.isNotBlank() && key.isNotBlank() && model.isNotBlank()
+    val provider: ApiProviderType get() = runCatching { ApiProviderType.valueOf(providerType) }.getOrDefault(ApiProviderType.OPENAI_GENERIC)
+}
     val enableTools: Boolean = true,               // 工具调用总开关
     val contextWindow: Int = 131072                // 上下文预算（估算 token），历史超限时从最旧裁剪，保留 system
 ) {

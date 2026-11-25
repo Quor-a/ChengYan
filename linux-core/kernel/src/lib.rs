@@ -46,7 +46,7 @@ impl GuestMem {
             return Err(format!("bad cstr {addr:#x}"));
         }
         let end = self.data[a..].iter().position(|&b| b == 0).map(|p| a + p).unwrap_or(self.data.len());
-        String::from_utf8_lossy(&self.data[a..end]).into_owned()
+        Ok(String::from_utf8_lossy(&self.data[a..end]).into_owned())
     }
 }
 

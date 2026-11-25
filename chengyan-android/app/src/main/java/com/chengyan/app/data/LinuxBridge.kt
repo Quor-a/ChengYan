@@ -13,6 +13,7 @@ object LinuxBridge {
         val busy: Boolean = false,
         val exit: Int? = null,
         val output: String = "",
+        val outputLen: Int = 0,
     )
 
     private val machine = AtomicLong(0)
@@ -123,27 +124,54 @@ object LinuxBridge {
     private fun parseState(json: String): State {
         val busy = json.contains("\"busy\":true")
         val exit = Regex("\"exit\":(-?\\d+)").find(json)?.let { it.groupValues[1].toIntOrNull() }
-        val out = Regex("\"output\":\"(.*)\"\\s*$", RegexOption.DOT_MATCHES_ALL).find(json)?.let { it.groupValues[1] } ?: ""
-        val sb = StringBuilder(out.length)
+        val outLen = Regex("\"len\":(\\d+)").find(json)?.let { it.groupValues[1].toIntOrNull() } ?: 0
+        // output 是 JSON 最后一个字段：用 indexOf 有界提取，硬上限 2MB——
+        // 贪婪正则 + groupValues 在异常大 json 上会产生巨型字符串拷贝（真机 OOM 268435472 的直接嫌疑）。
+        val out = run {
+            val key = "\"output\":\""
+            val s0 = json.indexOf(key)
+            if (s0 < 0) "" else {
+                val s = s0 + key.length
+                val e = json.lastIndexOf('"').coerceAtLeast(s)
+                val raw = json.substring(s, e)
+                if (raw.length > 2 * 1024 * 1024) raw.takeLast(2 * 1024 * 1024) else raw
+            }
+        }
+        // json/out 尺寸随诊断输出（OOM 定位用）
+        diagSizes = "json=${json.length} out=${out.length}"
+        return State(busy, exit, decodeOutput(out), outLen)
+    }
+
+    /** JSON 转义输出 → 原始字节 → UTF-8 文本。纯函数，JVM 单元测试覆盖。 */
+    internal fun decodeOutput(out: String): String {
+        val bytes = java.io.ByteArrayOutputStream(out.length)
         var i = 0
         while (i < out.length) {
             val c = out[i]
             if (c == '\\' && i + 1 < out.length) {
                 when (val n = out[i + 1]) {
-                    'n' -> { sb.append('\n'); i += 2 }
-                    'r' -> { sb.append('\r'); i += 2 }
-                    't' -> { sb.append('\t'); i += 2 }
-                    '"' -> { sb.append('"'); i += 2 }
-                    '\\' -> { sb.append('\\'); i += 2 }
+                    'n' -> { bytes.write(0x0A); i += 2 }
+                    'r' -> { bytes.write(0x0D); i += 2 }
+                    't' -> { bytes.write(0x09); i += 2 }
+                    '"' -> { bytes.write(0x22); i += 2 }
+                    '\\' -> { bytes.write(0x5C); i += 2 }
                     'u' -> {
                         val hex = out.getOrNull(i + 2)?.let { out.substring(i + 2, (i + 6).coerceAtMost(out.length)) }
                         val v = hex?.toIntOrNull(16)
-                        if (v != null && hex?.length == 4) { sb.append(v.toChar()); i += 6 } else { sb.append(n); i += 2 }
+                        when {
+                            v != null && hex?.length == 4 -> {
+                                // native 逐字节转义：\u00XX 即原字节；≥0x100 的码点按 UTF-8 写入兜底
+                                if (v in 0x00..0xFF) bytes.write(v)
+                                else bytes.write(String(Character.toChars(v)).toByteArray(Charsets.UTF_8))
+                                i += 6
+                            }
+                            else -> { bytes.write(n.code); i += 2 }
+                        }
                     }
-                    else -> { sb.append(n); i += 2 }
+                    else -> { bytes.write(n.code); i += 2 }
                 }
-            } else { sb.append(c); i++ }
+            } else { bytes.write(c.code); i += 1 }
         }
-        return State(busy, exit, sb.toString())
+        return String(bytes.toByteArray(), Charsets.UTF_8)
     }
 }

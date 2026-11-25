@@ -12,6 +12,7 @@ package com.chengyan.app.ui.screens
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -312,7 +313,7 @@ fun TagManageScreen(
 suspend fun buildPersonaPackageJson(soul: SoulCard, memRepo: SoulMemoryRepository): String {
     val memories = memRepo.loadForPersona(soul.id)
     val json = kotlinx.serialization.json.Json { encodeDefaults = true; prettyPrint = true }
-    return json.encodeToString(PersonaPackage(cards = listOf(soul), memories = memories))
+    return json.encodeToString(PersonaPackage.serializer(), PersonaPackage(cards = listOf(soul), memories = memories))
 }
 
 /** 从人格包 JSON 导入：返回插入的灵魂卡数。 */

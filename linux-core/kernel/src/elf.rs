@@ -25,7 +25,8 @@ pub fn load_static(mem: &mut GuestMem, bytes: &[u8], mem_size: u64) -> Result<cr
     if bytes[4] != 2 || bytes[5] != 1 {
         return Err("need ELF64 LE".into());
     }
-    if bytes[7] != 0 && bytes[7] != 183 {
+    // osabi: 0=SYSV, 3=Linux（glibc 产 3）；183=ARM
+    if bytes[7] != 0 && bytes[7] != 3 && bytes[7] != 183 {
         return Err(format!("unsupported abi osabi={}", bytes[7]));
     }
     let mut r = Reader { b: bytes, off: 0 };
@@ -84,8 +85,8 @@ pub fn load_static(mem: &mut GuestMem, bytes: &[u8], mem_size: u64) -> Result<cr
     if max_end == 0 {
         return Err("no PT_LOAD segments".into());
     }
-    // 栈：放高地址，向下生长；预留 auxv/argv 空间
-    let stack_top = mem_size & !0xf;
+    // 栈：顶在内存区上限下方 64KB，向下生长（guest 栈页从 stack_top 往低处）
+    let stack_top = (mem_size - 0x1_0000) & !0xf;
     Ok(crate::LoadedImage { entry: e_entry, stack_top, brk: (max_end + 0xfff) & !0xfff })
 }
 

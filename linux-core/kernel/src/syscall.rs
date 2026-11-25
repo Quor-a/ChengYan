@@ -60,16 +60,14 @@ pub fn handle(p: &mut Process, regs: &mut [u64; 31]) -> Option<i64> {
                 match a0 {
                     1 => {
                         use std::io::Write;
-                        let mut h = std::io::stdout().lock();
-                        let _ = h.write_all(&buf);
-                        let _ = h.flush();
+                        let _ = p.out.write_all(&buf);
+                        let _ = p.out.flush();
                         len as i64
                     }
                     2 => {
                         use std::io::Write;
-                        let out = std::io::stderr();
-                        let mut h = out.lock();
-                        let _ = h.write_all(&buf);
+                        let _ = p.err.write_all(&buf);
+                        let _ = p.err.flush();
                         len as i64
                     }
                     _ => {
@@ -95,6 +93,25 @@ pub fn handle(p: &mut Process, regs: &mut [u64; 31]) -> Option<i64> {
             p.exit_code = Some(a0 as i64);
             return Some(a0 as i64);
         }
+        // set_tid_address：单进程 P2，返回伪 tid
+        113 => { // clock_gettime：CLOCK_REALTIME=0 / MONOTONIC=1
+            use std::time::{SystemTime, UNIX_EPOCH};
+            let (s, ns) = if a0 == 1 {
+                (0u64, 0u64) // 单调钟：单进程无锚点，给 0（避免负值）
+            } else {
+                match SystemTime::now().duration_since(UNIX_EPOCH) {
+                    Ok(d) => (d.as_secs(), d.subsec_nanos() as u64),
+                    Err(_) => (0, 0),
+                }
+            };
+            let b = s.to_le_bytes().iter().chain(ns.to_le_bytes().iter()).cloned().collect::<Vec<u8>>();
+            if p.mem.write(a1, &b).is_err() { -14 } else { 0 }
+        }
+        101 => 0, // nanosleep：单进程即睡即醒（真实休眠由 P3 计时器接管，此处即时返回）
+        115 => 0, // clock_nanosleep
+        96 => 1,
+        // ppoll：P2 无真实事件源，返回 0（超时，fd 均视为未就绪）
+        73 => 0,
         SYS_GETPID => 1000,
         SYS_GETPPID => 1,
         SYS_GETUID | SYS_GETEUID => {
@@ -174,7 +191,7 @@ pub fn handle(p: &mut Process, regs: &mut [u64; 31]) -> Option<i64> {
                 if p.mem.read(ptr, &mut buf).is_err() { ok = false; break; }
                 if a0 == 1 || a0 == 2 {
                     use std::io::Write;
-                    let out = if a0 == 1 { Box::new(std::io::stdout()) as Box<dyn Write> } else { Box::new(std::io::stderr()) as Box<dyn Write> };
+                    let mut out: Box<dyn Write> = if a0 == 1 { Box::new(&mut p.out) as Box<dyn Write> } else { Box::new(&mut p.err) as Box<dyn Write> };
                     let mut h = out;
                     let _ = h.write_all(&buf);
                     let _ = h.flush();
@@ -455,8 +472,6 @@ pub fn handle(p: &mut Process, regs: &mut [u64; 31]) -> Option<i64> {
         }
         // openat（真实宿主文件，P3 前的直通实现）：读 C 字符串路径，按低 2 位访问模式 + CREAT/TRUNC/APPEND 打开
         SYS_OPENAT => {
-            use std::io::Write;
-            let _ = std::io::stdout().flush();
             let mut pathb = Vec::new();
             let mut q = a1;
             loop {
@@ -467,7 +482,19 @@ pub fn handle(p: &mut Process, regs: &mut [u64; 31]) -> Option<i64> {
                 q += 1;
                 if pathb.len() > 4096 { return Some(-36); } // ENAMETOOLONG
             }
-            let path = String::from_utf8_lossy(&pathb).into_owned();
+            let raw = String::from_utf8_lossy(&pathb).into_owned();
+            // fs 越狱防护：规范化后强制落在 root 内
+            let joined = if raw.starts_with('/') { p.root.join(raw.trim_start_matches('/')) } else { p.root.join(&raw) };
+            let mut norm = std::path::PathBuf::new();
+            for comp in joined.components() {
+                match comp {
+                    std::path::Component::ParentDir => { norm.pop(); }
+                    std::path::Component::CurDir => {}
+                    c => norm.push(c.as_os_str()),
+                }
+            }
+            if !norm.starts_with(&p.root) { return Some(-13); } // EACCES：拒绝越狱
+            let path = norm;
             let flags = a2 as u32;
             const O_ACCMODE: u32 = 3;
             const O_CREAT: u32 = 0x40;
@@ -504,15 +531,14 @@ pub fn handle(p: &mut Process, regs: &mut [u64; 31]) -> Option<i64> {
             if p.files.remove(&(a0 as i64)).is_some() { 0 } else { EBADF }
         }
         SYS_READ => {
-            // a0=fd, a1=buf, a2=len；fd 0 未在表中时透传宿主 stdin
+            // a0=fd, a1=buf, a2=len；fd 0 未在表中时读注入的 stdin 缓冲
             use std::io::Read;
             let len = (a2 as usize).min(1 << 20);
             if a0 == 0 && !p.files.contains_key(&0) {
+                use std::io::Seek;
                 let mut buf = vec![0u8; len];
-                match std::io::stdin().read(&mut buf) {
-                    Ok(n) => { if p.mem.write(a1, &buf[..n]).is_err() { -14 } else { n as i64 } }
-                    Err(_) => -5,
-                }
+                let n = p.stdin.read(&mut buf).unwrap_or(0);
+                if p.mem.write(a1, &buf[..n]).is_err() { -14 } else { n as i64 }
             } else {
             let f = match p.files.get_mut(&(a0 as i64)) { Some((f, _)) => f, None => return Some(EBADF) };
             let mut buf = vec![0u8; len];
@@ -531,28 +557,46 @@ pub fn handle(p: &mut Process, regs: &mut [u64; 31]) -> Option<i64> {
             let w = match a2 { 0 => SeekFrom::Start(off as u64), 1 => SeekFrom::Current(off), 2 => SeekFrom::End(off), _ => return Some(-22) };
             match f.seek(w) { Ok(pos) => pos as i64, Err(_) => -29 } // ESPIPE
         }
-        SYS_SENDFILE => {
+SYS_SENDFILE => {
             // sendfile(out, in, offset_ptr, count)：busybox cat 用；offset 为 NULL 时从当前位置
+            // 入端支持虚拟 stdin（fd0 游标）、socket、文件；出端支持 p.out/p.err（fd1/2）、文件
             let count = regs[3] as usize;
             use std::io::{Read, Seek, SeekFrom, Write};
             let (buf, cur) = {
-                let f = match p.files.get_mut(&(a1 as i64)) { Some((f, _)) => f, None => return Some(EBADF) };
+                let mut buf = vec![0u8; count.min(1 << 20)];
+                let cur;
+                if let Some(sk) = p.sockets.get_mut(&(a1 as i64)) {
+                    let n = match sk {
+                        Sock::Tcp(s) => s.read(&mut buf),
+                        Sock::Udp(s) => s.recv(&mut buf),
+                        Sock::PendingTcp => return ProcCtl::Exit(EBADF),
+                    };
+                    let n = match n { Ok(n) => n, Err(_) => return ProcCtl::Exit(-5) };
+                    cur = 0; buf.truncate(n);
+                } else if a1 == 0 && !p.files.contains_key(&0) {
+                    let n = p.stdin.read(&mut buf).unwrap_or(0);
+                    cur = p.stdin.position();
+                    buf.truncate(n);
+                } else {
+                let f = match p.files.get_mut(&(a1 as i64)) { Some((f, _)) => f, None => return ProcCtl::Exit(EBADF) };
                 if a2 != 0 {
                     let mut e = [0u8; 8];
-                    if p.mem.read(a2, &mut e).is_err() { return Some(-14); }
+                    if p.mem.read(a2, &mut e).is_err() { return ProcCtl::Exit(-14); }
                     let off = u64::from_le_bytes(e);
-                    if f.seek(SeekFrom::Start(off)).is_err() { return Some(-29); }
+                    if f.seek(SeekFrom::Start(off)).is_err() { return ProcCtl::Exit(-29); }
                 }
-                let mut buf = vec![0u8; count.min(1 << 20)];
-                let n = match f.read(&mut buf) { Ok(n) => n, Err(_) => return Some(-5) };
-                let cur = f.stream_position().unwrap_or(0);
-                (buf[..n].to_vec(), cur)
+                let n = match f.read(&mut buf) { Ok(n) => n, Err(_) => return ProcCtl::Exit(-5) };
+                cur = f.stream_position().unwrap_or(0);
+                buf.truncate(n);
+                }
+                (buf, cur)
             };
             let sent = if a0 == 1 || a0 == 2 {
-                let mut h = std::io::stdout().lock();
-                h.write_all(&buf).and_then(|_| h.flush()).is_ok()
+                use std::io::Write;
+                let sink: &mut dyn std::io::Write = if a0 == 1 { &mut p.out } else { &mut p.err };
+                sink.write_all(&buf).and_then(|_| sink.flush()).is_ok()
             } else {
-                match p.files.get_mut(&(a0 as i64)) { Some((g, _)) => g.write_all(&buf).is_ok(), None => return Some(EBADF) }
+                match p.files.get_mut(&(a0 as i64)) { Some((g, _)) => g.write_all(&buf).is_ok(), None => return ProcCtl::Exit(EBADF) }
             };
             if !sent { return Some(-5); }
             if a2 != 0 {

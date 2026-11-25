@@ -4,7 +4,6 @@ package com.chengyan.app.data
  * 灵魂卡（人格）—— 数据层，语义移植自 Quor-a/ZorvAI 的 QuroPersona / QuroPersonaViewModel：
  *   · 灵魂卡 = 可编辑人格：名称 / 头像 / 描述 / 角色设定 / 开场白 / 聊天设定
  *   · 卡片可激活 / 编辑 / 删除；激活的灵魂作为该对话的系统提示词注入（对话记住自己的灵魂）
- *   · 开场白：用灵魂卡开新对话时自动作为一条助手消息发出（ZorvAI 同语义）
  * 视觉为澄言原创暖纸×墨×陶土橙，存储走 DataStore（与 SettingsStore 同管线）。
  */
 
@@ -29,8 +28,8 @@ data class SoulCard(
     val avatarUri: String = "",          // 应用私有目录里的头像绝对路径；空 = 首字圆标
     val description: String = "",        // 一句话描述（列表卡片副标题）
     val roleSetting: String = "",        // 角色设定（注入为系统提示词主体）
-    val opening: String = "",            // 开场白（新对话自动发出）
     val chatSetting: String = "",        // 聊天设定（语气/格式等附加约束）
+    val tags: List<String> = emptyList(), // 标签（从全局标签池选择）
     val createdAt: Long = 0,
     val updatedAt: Long = 0,
 ) {
@@ -66,10 +65,35 @@ data class SoulCard(
 
 class SoulRepository(private val context: Context) {
 
-    suspend fun loadAll(): List<SoulCard> =
-        context.soulStore.data.first()[SOULS_KEY]?.let {
+    suspend fun loadAll(): List<SoulCard> {
+        val list = context.soulStore.data.first()[SOULS_KEY]?.let {
             runCatching { soulJson.decodeFromString<List<SoulCard>>(it) }.getOrDefault(emptyList())
         } ?: emptyList()
+        // 内置角色「小澄」：首次启动（或被删后）自动补回，永远存在
+        return if (list.none { it.id == BUILTIN_ID }) {
+            val withBuiltin = listOf(builtinCard()) + list
+            context.soulStore.edit { it[SOULS_KEY] = soulJson.encodeToString(withBuiltin) }
+            withBuiltin
+        } else list
+    }
+
+    companion object {
+        const val BUILTIN_ID = "builtin_xiaocheng"
+
+        /** 内置灵魂角色「小澄」（头像 = 原创 vector 小猫 ic_soul_default）。 */
+        fun builtinCard() = SoulCard(
+            id = BUILTIN_ID,
+            name = "小澄",
+            avatarUri = "builtin",
+            description = "澄言的内置伙伴，一只爱帮忙的陶土橘猫",
+            roleSetting = "你叫小澄，是澄言 App 的内置 AI 伙伴，形象是一只暖橘色的卡通小猫。" +
+                "你说话亲切自然、简洁真诚，像熟悉的朋友一样陪用户聊天、帮忙办事。" +
+                "你擅长使用手机工具帮用户完成实际操作，做完简单汇报，不啰嗦。",
+            chatSetting = "语气轻松温暖，偶尔带一点猫的俏皮（不用每句都提猫）。回答先给结论再给理由。",
+            createdAt = 0,
+            updatedAt = 0,
+        )
+    }
 
     suspend fun save(card: SoulCard) {
         val list = loadAll().filterNot { it.id == card.id } + card

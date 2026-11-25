@@ -112,7 +112,6 @@ fun TerminalScreen(onBack: () -> Unit) {
                     color = TermFg,
                     modifier = Modifier.verticalScroll(outScroll).padding(12.dp)
                 )
-            }
             if (!follow) {
                 Surface(
                     onClick = { follow = true },

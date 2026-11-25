@@ -35,6 +35,20 @@ class ChatViewModel(
     val quroCustomProviderRepo = com.chengyan.app.core.model.QuroCustomProviderRepository(appContext)
     val quroMultiProviderRepo = com.chengyan.app.core.model.QuroMultiProviderRepository(appContext)
 
+    // ---- 灵魂卡（语义移植自 ZorvAI QuroPersonaViewModel）----
+    val soulRepo = com.chengyan.app.data.SoulRepository(appContext)
+    var souls by mutableStateOf<List<com.chengyan.app.data.SoulCard>>(emptyList())
+        private set
+
+    // ---- 用户资料（设置里维护；用户消息行全局显示）----
+    val userRepo = com.chengyan.app.data.UserProfileRepository(appContext)
+    var userProfile by mutableStateOf(com.chengyan.app.data.UserProfile())
+        private set
+    fun updateUserProfile(p: com.chengyan.app.data.UserProfile) {
+        userProfile = p
+        viewModelScope.launch { userRepo.save(p) }
+    }
+
     /** ZorvAI 风格的活跃模型配置（与下方 ModelConfig 同步）。 */
     var quroConfig by mutableStateOf(com.chengyan.app.core.model.QuroModelConfig())
         private set
@@ -68,6 +82,8 @@ class ChatViewModel(
     init {
         viewModelScope.launch { config = settings.config.first() }
         viewModelScope.launch { profiles = settings.profiles.first() }
+        viewModelScope.launch { souls = soulRepo.loadAll() }
+        viewModelScope.launch { userProfile = userRepo.load() }
         // 加载 ZorvAI 配置层并同步到既有 ModelConfig；同时把预设登记进多提供商仓库（故障转移用）
         viewModelScope.launch {
             quroConfig = quroConfigRepo.load()
@@ -88,6 +104,10 @@ class ChatViewModel(
             chats.conversations.collect { list ->
                 conversations = list
                 current?.let { c -> current = list.firstOrNull { it.id == c.id } ?: c }
+                    ?: run {
+                        // 启动恢复：指向最近更新的对话（有消息才算有记录）
+                        list.filter { it.messages.isNotEmpty() }.maxByOrNull { it.updated }?.let { current = it }
+                    }
             }
         }
     }
@@ -224,7 +244,33 @@ class ChatViewModel(
         return quroMultiProviderRepo.getNextProvider(curId)
     }
 
-    /* ---------- 助手 ---------- */
+    /* ---------- 灵魂卡（ZorvAI 灵魂注入语义） ---------- */
+    fun saveSoul(card: com.chengyan.app.data.SoulCard) {
+        viewModelScope.launch {
+            soulRepo.save(card)
+            souls = soulRepo.loadAll()
+            _toast.value = "已保存灵魂卡「${card.name}」"
+        }
+    }
+
+    fun deleteSoul(id: String) {
+        viewModelScope.launch {
+            soulRepo.delete(id)
+            souls = soulRepo.loadAll()
+            conversations.filter { it.soulId == id }.forEach { it.soulId = "" }
+            persist()
+        }
+    }
+
+    /** 用一张灵魂卡（或 null=不使用）开新对话；对话记住自己的灵魂。 */
+    fun startWithSoul(card: com.chengyan.app.data.SoulCard?) {
+        newConversation()
+        current?.soulId = card?.id ?: ""
+        if (card != null) current?.title = "新对话 · ${card.name}"
+        persist()
+    }
+
+    /* ---------- 助手（保留兼容） ---------- */
     fun startWithAssistant(a: AssistantPreset?) {
         assistant = a
         newConversation()
@@ -236,7 +282,9 @@ class ChatViewModel(
     /* ---------- 对话 ---------- */
     fun newConversation() {
         val now = System.currentTimeMillis()
-        current = Conversation(id = now, title = "新对话", created = now)
+        val c = Conversation(id = com.chengyan.app.data.IdGen.next(), title = "新对话", created = now)
+        current = c
+        conversations = conversations + c
         persist()
     }
 
@@ -276,8 +324,8 @@ class ChatViewModel(
         if (!config.configured) { _toast.value = "请先在设置中完成模型配置"; return }
         val c = current ?: run { newConversation(); current!! }
         val now = System.currentTimeMillis()
-        if (c.messages.isEmpty()) c.title = text.take(18)
-        c.messages.add(Message(now, "user", text, now, images = images))
+        if (c.messages.isEmpty()) c.title = text.replace("\n", " ").trim().take(18)
+        c.messages.add(Message(com.chengyan.app.data.IdGen.next(), "user", text, now, images = images))
         c.updated = now
         request(c, historyUpTo(c, c.messages.lastIndex))
     }
@@ -304,7 +352,7 @@ class ChatViewModel(
         if (idx < 0) return
         msg.content = newText
         while (c.messages.size > idx + 1) c.messages.removeAt(c.messages.size - 1)
-        if (c.messages.size == 1) c.title = newText.take(18)
+        if (c.messages.size == 1) c.title = newText.replace("\n", " ").trim().take(18)
         c.updated = System.currentTimeMillis()
         request(c, historyUpTo(c, idx))
     }
@@ -354,7 +402,18 @@ class ChatViewModel(
         if (sys.isNotBlank()) turns.add(OpenAiClient.ChatTurn("system", sys))
         for (i in 0..endIdx.coerceAtMost(c.messages.size - 1)) {
             val m = c.messages[i]
-            if (!m.isError) turns.add(OpenAiClient.ChatTurn(m.role, m.content, m.images))
+            if (!m.isError) {
+                if (m.toolCalls.isNotEmpty()) {
+                    // 历史中的 assistant 工具调用与其结果一并回放
+                    val calls = m.toolCalls.map { OpenAiClient.ToolCallData(it.id, it.name, it.arguments) }
+                    turns.add(OpenAiClient.ChatTurn("assistant", m.content, toolCalls = calls))
+                    m.toolCalls.forEach { tc ->
+                        turns.add(OpenAiClient.ChatTurn("tool", tc.result, toolCallId = tc.id))
+                    }
+                } else {
+                    turns.add(OpenAiClient.ChatTurn(m.role, m.content, m.images))
+                }
+            }
         }
         // 图片只保留最近两轮，避免上下文爆炸
         val cutoff = turns.size - 2
@@ -377,7 +436,7 @@ class ChatViewModel(
 
     private fun request(c: Conversation, history: List<OpenAiClient.ChatTurn>, allowFailover: Boolean = true) {
         val now = System.currentTimeMillis()
-        val ai = Message(now, "assistant", "", now, model = config.model, streaming = true)
+        val ai = Message(com.chengyan.app.data.IdGen.next(), "assistant", "", now, model = config.model, streaming = true)
         c.messages.add(ai)
         streaming = true
         persist()
@@ -385,35 +444,103 @@ class ChatViewModel(
 
         streamJob = viewModelScope.launch {
             try {
-                client.stream(config, history).collect { ev ->
-                    when (ev) {
-                        is OpenAiClient.StreamEvent.Delta -> {
-                            ai.content += ev.text
-                            current = null; current = c
-                        }
-                        is OpenAiClient.StreamEvent.Failure -> {
-                            ai.isError = true
-                            ai.content = "请求失败：${ev.message}"
-                        }
-                        OpenAiClient.StreamEvent.Done -> {
-                            if (ai.content.isBlank()) ai.content = "（模型返回了空回复）"
+                var turns = history
+                var iter = 0
+                var cancelled = false
+                while (true) {
+                    iter++
+                    val contentBuf = StringBuilder()
+                    val thinkingStart = System.currentTimeMillis()
+                    val pendingCalls = LinkedHashMap<Int, OpenAiClient.ToolCallData>()
+                    client.stream(config, turns).collect { ev ->
+                        when (ev) {
+                            is OpenAiClient.StreamEvent.Delta -> {
+                                contentBuf.append(ev.text)
+                                ai.content = contentBuf.toString()
+                                current = null; current = c
+                            }
+                            is OpenAiClient.StreamEvent.ThinkingDelta -> {
+                                if (ai.thinking.isEmpty()) ai.thinkingMs = 0
+                                ai.thinking += ev.text
+                                ai.thinkingMs = System.currentTimeMillis() - thinkingStart
+                                current = null; current = c
+                            }
+                            is OpenAiClient.StreamEvent.ToolCallDelta -> {
+                                val tc = pendingCalls.getOrPut(ev.index) {
+                                    OpenAiClient.ToolCallData(ev.id ?: "call_${iter}_${ev.index}", ev.name ?: "", "")
+                                }
+                                if (!ev.id.isNullOrBlank()) tc.id = ev.id
+                                if (!ev.name.isNullOrBlank()) tc.name = ev.name
+                                tc.result += ev.argsFragment   // 先把参数碎片暂存在 result 字段
+                                current = null; current = c
+                            }
+                            is OpenAiClient.StreamEvent.Failure -> {
+                                ai.isError = true
+                                ai.content = if (ai.content.isBlank()) "请求失败：${ev.message}" else ai.content
+                                markProfile(config.url, ok = false)
+                            }
+                            OpenAiClient.StreamEvent.Done -> {}
                         }
                     }
+                    if (!streaming) { cancelled = true } // stop() 取消时 streaming 仍为 true，见 finally；此处以 Job 取消为准
+
+                    // 模型没有发起工具调用 → 最终回答完成
+                    if (pendingCalls.isEmpty() || iter >= 6) {
+                        ai.content = contentBuf.toString().ifBlank { ai.content.ifBlank { "（模型返回了空回复）" } }
+                        break
+                    }
+
+                    // 执行每个工具调用（参数已在 result 暂存字段中拼好）
+                    val executed = pendingCalls.values.map { tc ->
+                        val args = tc.result
+                        com.chengyan.app.data.ToolCallInfo(tc.id, tc.name, args, com.chengyan.app.net.Tools.execute(tc.name, args))
+                    }
+                    ai.toolCalls.addAll(executed)
+                    ai.content = contentBuf.toString()
+                    current = null; current = c
+
+                    // 回传结果继续生成
+                    turns = turns + OpenAiClient.ChatTurn("assistant", contentBuf.toString(), toolCalls =
+                        executed.map { OpenAiClient.ToolCallData(it.id, it.name, it.arguments) }) +
+                        executed.map { OpenAiClient.ChatTurn("tool", it.result, toolCallId = it.id) }
                 }
+                if (cancelled && ai.content.isBlank()) ai.content = "（已停止生成）"
             } catch (_: kotlinx.coroutines.CancellationException) {
-                if (ai.content.isBlank()) ai.content = "（已停止生成）"
+                if (ai.content.isBlank() && ai.toolCalls.isEmpty()) ai.content = "（已停止生成）"
             } finally {
                 ai.streaming = false
                 streaming = false
                 c.updated = System.currentTimeMillis()
                 persist()
                 current = null; current = c
+                // 自动故障转移（QuroMultiProviderRepository.getNextProvider）：本次失败且未产出内容 → 切到下一个健康提供商并重试一次
+                if (allowFailover && ai.isError && ai.content.startsWith("请求失败") && ai.toolCalls.isEmpty()) {
+                    val candidate = failoverCandidate(config.url)
+                    if (candidate != null) {
+                        c.messages.remove(ai)
+                        val prev = config
+                        saveQuroConfig(quroConfig.copy(
+                            provider = candidate.providerType.name,
+                            baseUrl = candidate.baseUrl,
+                            apiKey = candidate.apiKey,
+                            model = candidate.defaultModel.ifBlank { prev.model },
+                        ))
+                        _toast.value = "「${prev.model}」请求失败，已自动切换到「${candidate.name}」重试"
+                        request(c, history, allowFailover = false)
+                    }
+                } else if (!ai.isError && ai.content.isNotBlank()) {
+                    markProfile(config.url, ok = true)
+                }
             }
         }
     }
 
     private fun persist() {
-        val snapshot = conversations.toList()
+        // 🔴 快照必须包含 current：newConversation 只改 current 不进列表，
+        //    旧实现存的是不含当前对话的列表 → 重启后记录全部丢失
+        val snapshot = (conversations + listOfNotNull(current)).distinctBy { it.id }
         viewModelScope.launch { chats.save(snapshot) }
+        // 同步回内存列表，保证抽屉/搜索立即可见
+        conversations = snapshot
     }
 }
