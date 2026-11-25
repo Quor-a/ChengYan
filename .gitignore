@@ -11,3 +11,5 @@ captures/
 linux-core/target/
 linux-core/*.log
 *.apk
+build_*.log
+test_*.log
