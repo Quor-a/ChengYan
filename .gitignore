@@ -6,3 +6,8 @@ local.properties
 captures/
 .externalNativeBuild/
 .cxx/
+
+# Rust 引擎编译产物 / 临时日志
+linux-core/target/
+linux-core/*.log
+*.apk

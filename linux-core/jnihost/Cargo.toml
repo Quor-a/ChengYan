@@ -1,0 +1,12 @@
+[package]
+name = "ch-jnihost"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "chlinux"
+crate-type = ["cdylib"]
+
+[dependencies]
+ch-host = { path = "../host" }
+jni = "0.21"

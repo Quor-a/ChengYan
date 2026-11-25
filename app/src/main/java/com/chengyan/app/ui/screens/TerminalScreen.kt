@@ -106,7 +106,10 @@ fun TerminalScreen(onBack: () -> Unit) {
         // 输出区
         Box(Modifier.weight(1f).fillMaxWidth().padding(horizontal = 10.dp)) {
             Surface(color = TermBg, shape = RoundedCornerShape(14.dp), modifier = Modifier.fillMaxSize()) {
-                val text = (probeOut?.let { it + "\n\n" } ?: "") + renderOut(st.output.drop(clearAt), st.busy, st.exit)
+                // clearAt 是设置清屏那一刻的绝对长度；输出环形缓冲截断后 st.output 会变短，
+                // 直接 drop 会返回空串导致画面全白。clamp 到当前长度：新输出仍可见。
+                val from = clearAt.coerceAtMost(st.output.length)
+                val text = (probeOut?.let { it + "\n\n" } ?: "") + renderOut(st.output.drop(from), st.busy, st.exit)
                 Text(
                     text.ifBlank {
                         "澄言 Linux · 进程内 busybox（ARM64 二进制翻译，无 root）\n输入命令回车执行。试：ls / 或 echo hello"
@@ -212,18 +215,33 @@ private fun renderOut(out: String, busy: Boolean, exit: Int?): String {
     var i = 0
     while (i < out.length) {
         val c = out[i]
-        if (c == '') {
+        if (c == '\u001B') {
             i++
-            if (i < out.length && out[i] == '[') {
-                i++
-                while (i < out.length && !out[i].isLetter()) i++
-                if (i < out.length) i++
-            } else if (i < out.length && out[i] == ']') {
-                i++
-                while (i < out.length && out[i] != '') i++
-                if (i < out.length) i++
+            when {
+                // CSI: ESC [ 后跟参数字节(0x20-0x3F)，以最终字节 0x40-0x7E 结束
+                // （不只 isLetter：光标/擦除类控制序列以 @ ~ 等结尾，旧实现会误吞后续输出）
+                i < out.length && out[i] == '[' -> {
+                    i++
+                    while (i < out.length && out[i].code in 0x20..0x3F) i++
+                    if (i < out.length && out[i].code in 0x40..0x7E) i++
+                }
+                // OSC: ESC ] 后到 BEL(0x07) 或 ST(ESC \) 结束。
+                // 旧实现只认 BEL，遇到 ST 结尾会一路吞到字符串末尾 → 丢全部后续输出。
+                i < out.length && out[i] == ']' -> {
+                    i++
+                    while (i < out.length) {
+                        if (out[i] == '\u0007') { i++; break }
+                        if (out[i] == '\u001B' && i + 1 < out.length && out[i + 1] == '\\') { i += 2; break }
+                        i++
+                    }
+                }
+                // 其余单字符转义：ESC 后一个 0x40-0x5F 字符
+                i < out.length && out[i].code in 0x40..0x5F -> i++
             }
-        } else { sb.append(c); i++ }
+        } else {
+            sb.append(c)
+            i++
+        }
     }
     val status = if (busy) "" else if (exit != null) "\n—— 已退出（$exit）——" else ""
     return sb.toString() + status
