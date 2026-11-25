@@ -21,6 +21,19 @@ object LinuxBridge {
     private var ctx: android.content.Context? = null
     private val lock = Any()
 
+    /**
+     * Compose 可观察的状态镜像。AtomicReference 本身不触发重组——终端页必须收集这个
+     * StateFlow 才能看到 poll 结果。每次 state 更新后同步 emit。
+     */
+    private val _stateFlow = kotlinx.coroutines.flow.MutableStateFlow(State())
+    val stateFlow: kotlinx.coroutines.flow.StateFlow<State> get() = _stateFlow
+
+    /** 统一更新缓存 + 通知 Compose。所有 state.set 都改走这里。 */
+    private fun publish(s: State) {
+        state.set(s)
+        _stateFlow.value = s
+    }
+
     fun init(appContext: android.content.Context) {
         if (ctx != null) return
         synchronized(lock) {
@@ -50,8 +63,27 @@ object LinuxBridge {
         synchronized(lock) {
             m = machine.get()
             if (m > 0) return m
-            m = LinuxNative.start(dir().absolutePath)
-            machine.set(m)
+            // 首启解包 rootfs：失败必须显式报错，否则 native start 会在空 rootfs 上"成功"，
+            // 之后每条命令都静默失败，表现为"整个终端都不行"。
+            val dataDir = dir()
+            val rootfs = java.io.File(dataDir, "rootfs")
+            if (!rootfs.isDirectory || !java.io.File(rootfs, "bin/busybox.static").isFile) {
+                publish(State(output = "[ch] rootfs 解包失败：缺少 $rootfs/bin/busybox.static。请清 App 数据后重试。"))
+                return -10
+            }
+            m = LinuxNative.start(dataDir.absolutePath)
+            if (m > 0) {
+                machine.set(m)
+            } else {
+                // 不要把失败句柄缓存进 machine，允许下次重试；给出可读原因。
+                val why = when (m) {
+                    -1L -> "参数错误"
+                    -2L -> "无法创建 rootfs 目录"
+                    -3L -> "引擎会话创建失败（busybox ELF 加载失败）"
+                    else -> "未知错误"
+                }
+                publish(State(output = "[ch] 会话启动失败（$m）：$why"))
+            }
             return m
         }
     }
@@ -63,13 +95,13 @@ object LinuxBridge {
     /** 启动命令；返回任务号（-3 = 忙）。异常时写诊断到状态缓存。 */
     fun run(cmd: String): Long {
         val m = try { ensure() } catch (t: Throwable) {
-            state.set(State(output = "[ch-diag] ensure 异常 ${t::class.simpleName}: ${t.message}\n" +
+            publish(State(output = "[ch-diag] ensure 异常 ${t::class.simpleName}: ${t.message}\n" +
                 t.stackTraceToString().take(4000) + "\nheap: used=${usedHeap()}"))
             return -10
         }
         if (m <= 0) return -10
         return try { LinuxNative.exec(m, cmd) } catch (t: Throwable) {
-            state.set(State(output = "[ch-diag] exec 异常 ${t::class.simpleName}: ${t.message}\n" +
+            publish(State(output = "[ch-diag] exec 异常 ${t::class.simpleName}: ${t.message}\n" +
                 t.stackTraceToString().take(4000) + "\nheap: used=${usedHeap()}"))
             -11
         }
@@ -82,18 +114,18 @@ object LinuxBridge {
         val json = try { LinuxNative.poll(m) } catch (t: Throwable) {
             val s = State(output = "[ch-diag] poll 异常 ${t::class.simpleName}: ${t.message}\n" +
                 t.stackTraceToString().take(4000) + "\nheap: used=${usedHeap()}")
-            state.set(s); return s
+            publish(s); return s
         } ?: return state.get()
         if (json.length > 8 * 1024 * 1024) {
             val s = State(output = "[ch-diag] poll JSON ${json.length} 字符超限，跳过解析。heap: used=${usedHeap()}")
-            state.set(s); return s
+            publish(s); return s
         }
         val s = try { parseState(json) } catch (t: Throwable) {
             State(output = "[ch-diag] parseState 异常 ${t::class.simpleName}: ${t.message}\n" +
                 "sizes: $diagSizes\n" +
                 t.stackTraceToString().take(4000) + "\nheap: used=${usedHeap()}")
         }
-        state.set(s)
+        publish(s)
         return s
     }
 
@@ -116,7 +148,7 @@ object LinuxBridge {
             val m = machine.get()
             if (m > 0) LinuxNative.stop(m)
             machine.set(0)
-            state.set(State())
+            publish(State())
             return ensure() > 0
         }
     }

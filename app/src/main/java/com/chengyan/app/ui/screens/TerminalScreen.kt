@@ -58,14 +58,20 @@ fun TerminalScreen(onBack: () -> Unit) {
     val ctx = androidx.compose.ui.platform.LocalContext.current
     val outScroll = rememberScrollState()
 
-    // 150ms 轮询 native 输出（会话全局唯一，终端页与 linux 工具共享同一状态）
+    // 进入终端页就确保会话已建立（否则 poll 在 machine<=0 时直接返回空状态，
+    // 首次打开必须等用户输入命令才有输出，看起来像"终端坏了"）。
+    LaunchedEffect(Unit) {
+        runCatching { LinuxBridge.ensure() }.onFailure { error = "会话启动失败：${it.message}" }
+    }
+    // 150ms 轮询 native 输出。poll 的结果写进 stateFlow，页面收集它才会重组刷新——
+    // 旧实现读 LinuxBridge.current()（AtomicReference）不触发重组，输出永远停在首帧。
     LaunchedEffect(Unit) {
         while (true) {
             delay(150)
             runCatching { LinuxBridge.poll() }.onFailure { error = it.message }
         }
     }
-    val st = LinuxBridge.current()
+    val st by LinuxBridge.stateFlow.collectAsState()
     // 上滑停止跟随；↓ 或触底恢复
     LaunchedEffect(outScroll) {
         var prev = 0
