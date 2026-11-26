@@ -12,8 +12,8 @@ android {
         applicationId = "com.chengyan.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 7
-        versionName = "1.9.7"
+        versionCode = 8
+        versionName = "1.9.8"
     }
 
     signingConfigs {
@@ -39,7 +39,12 @@ android {
     kotlinOptions { jvmTarget = "17" }
     buildFeatures { compose = true }
     composeOptions { kotlinCompilerExtensionVersion = "1.5.14" }
-    packaging { resources.excludes += "/META-INF/{AL2.0,LGPL2.1}" }
+    packaging {
+        resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
+        // 与 manifest 的 extractNativeLibs=true 配套：so 压缩进 APK、安装时解到 lib 目录。
+        // 换来的是「任何设备/任何安装器都能 dlopen」——体积大 ~1MB，值得。
+        jniLibs.useLegacyPackaging = true
+    }
 }
 
 dependencies {

@@ -42,6 +42,26 @@ object LinuxBridge {
         }
     }
 
+    /** 供 [NativeLib] 取 Context 用（它需要 context 才能走 APK 解包通路）。 */
+    internal fun appContext(): android.content.Context? = ctx
+
+    /**
+     * 最近一次失败的完整原因（终端页与 `linux` 工具都会原样显示）。
+     *
+     * 真机事故教训：`run()` 只回一个 -10，模型只能转述「启动失败（task=-10）」，
+     * 真正的原因（so 加载失败 / rootfs 解包失败）被吞在状态缓存里，来回猜了十几轮。
+     * 现在任何失败都必须把全文写进这里。
+     */
+    @Volatile
+    var lastError: String = ""
+        private set
+
+    private fun fail(msg: String): Long {
+        lastError = msg
+        publish(State(output = msg))
+        return -10
+    }
+
     private fun dir(): java.io.File {
         val d = java.io.File(ctx!!.filesDir, "chlinux").apply { mkdirs() }
         val busy = java.io.File(d, "busybox")
@@ -63,17 +83,32 @@ object LinuxBridge {
         synchronized(lock) {
             m = machine.get()
             if (m > 0) return m
+            // 0) so 必须先在。放在 LinuxNative 的 <clinit> 之外，失败也不会把类弄脏。
+            if (!NativeLib.ensure(ctx)) {
+                return fail(NativeLib.failureText())
+            }
             // 首启解包 rootfs：失败必须显式报错，否则 native start 会在空 rootfs 上"成功"，
             // 之后每条命令都静默失败，表现为"整个终端都不行"。
-            val dataDir = dir()
+            val dataDir = try {
+                dir()
+            } catch (t: Throwable) {
+                return fail("[ch-rootfs] 解包 rootfs 失败：${t.javaClass.simpleName}: ${t.message}\n" +
+                    t.stackTraceToString().take(2000))
+            }
             val rootfs = java.io.File(dataDir, "rootfs")
             if (!rootfs.isDirectory || !java.io.File(rootfs, "bin/busybox.static").isFile) {
-                publish(State(output = "[ch] rootfs 解包失败：缺少 $rootfs/bin/busybox.static。请清 App 数据后重试。"))
-                return -10
+                return fail("[ch-rootfs] rootfs 解包失败：缺少 $rootfs/bin/busybox.static。\n" +
+                    "请清 App 数据后重试（设置 → 应用 → 澄言 → 存储 → 清除数据）。")
             }
-            m = LinuxNative.start(dataDir.absolutePath)
+            m = try {
+                LinuxNative.start(dataDir.absolutePath)
+            } catch (t: Throwable) {
+                return fail("[ch-native] start() 抛异常（so 已加载，调用失败）：\n" +
+                    "${t.javaClass.simpleName}: ${t.message}\n" + t.stackTraceToString().take(2000))
+            }
             if (m > 0) {
                 machine.set(m)
+                lastError = ""
             } else {
                 // 不要把失败句柄缓存进 machine，允许下次重试；给出可读原因。
                 val why = when (m) {
@@ -82,7 +117,7 @@ object LinuxBridge {
                     -3L -> "引擎会话创建失败（busybox ELF 加载失败）"
                     else -> "未知错误"
                 }
-                publish(State(output = "[ch] 会话启动失败（$m）：$why"))
+                return fail("[ch-native] 会话启动失败（$m）：$why\n${nativeInfo()}")
             }
             return m
         }
@@ -95,14 +130,15 @@ object LinuxBridge {
     /** 启动命令；返回任务号（-3 = 忙）。异常时写诊断到状态缓存。 */
     fun run(cmd: String): Long {
         val m = try { ensure() } catch (t: Throwable) {
-            publish(State(output = "[ch-diag] ensure 异常 ${t::class.simpleName}: ${t.message}\n" +
-                t.stackTraceToString().take(4000) + "\nheap: used=${usedHeap()}"))
-            return -10
+            return fail("[ch-diag] ensure 异常 ${t::class.simpleName}: ${t.message}\n" +
+                t.stackTraceToString().take(4000) + "\nheap: ${usedHeap()}")
         }
         if (m <= 0) return -10
         return try { LinuxNative.exec(m, cmd) } catch (t: Throwable) {
-            publish(State(output = "[ch-diag] exec 异常 ${t::class.simpleName}: ${t.message}\n" +
-                t.stackTraceToString().take(4000) + "\nheap: used=${usedHeap()}"))
+            // 拿到无效句柄（会话被 native 侧丢弃）时清掉句柄，下次自动重建
+            machine.compareAndSet(m, 0)
+            fail("[ch-diag] exec 异常 ${t::class.simpleName}: ${t.message}\n" +
+                t.stackTraceToString().take(4000) + "\nheap: ${usedHeap()}")
             -11
         }
     }
@@ -112,10 +148,21 @@ object LinuxBridge {
         val m = machine.get()
         if (m <= 0) return state.get()
         val json = try { LinuxNative.poll(m) } catch (t: Throwable) {
+            machine.compareAndSet(m, 0)
             val s = State(output = "[ch-diag] poll 异常 ${t::class.simpleName}: ${t.message}\n" +
-                t.stackTraceToString().take(4000) + "\nheap: used=${usedHeap()}")
+                t.stackTraceToString().take(4000) + "\nheap: ${usedHeap()}")
             publish(s); return s
         } ?: return state.get()
+        // "{}" = native 侧没有这个句柄（会话已失效）：清掉句柄，让下一条命令自动重建，
+        // 而不是一直对着一个死句柄空转。
+        if (json.length <= 2) {
+            if (machine.compareAndSet(m, 0)) {
+                val s = State(output = state.get().output +
+                    "\n[ch-session] 会话句柄失效，下次执行会自动重建。\n")
+                publish(s); return s
+            }
+            return state.get()
+        }
         if (json.length > 8 * 1024 * 1024) {
             val s = State(output = "[ch-diag] poll JSON ${json.length} 字符超限，跳过解析。heap: used=${usedHeap()}")
             publish(s); return s
@@ -146,11 +193,33 @@ object LinuxBridge {
     fun restart(): Boolean {
         synchronized(lock) {
             val m = machine.get()
-            if (m > 0) LinuxNative.stop(m)
+            if (m > 0) {
+                runCatching { LinuxNative.stop(m) }
+            }
             machine.set(0)
             publish(State())
+            lastError = ""
             return ensure() > 0
         }
+    }
+
+    /** 原生侧自检（so 已加载才有意义）：window 能否预留、Tier1 命中数等。 */
+    fun nativeInfo(): String = try {
+        if (!NativeLib.ensure(ctx)) NativeLib.failureText() else LinuxNative.info() ?: "（info 返回 null）"
+    } catch (t: Throwable) {
+        "[ch-native] info 异常 ${t::class.simpleName}: ${t.message}"
+    }
+
+    /** 一条命令给出全部现场：so 加载通路、原生自检、会话句柄、内存。 */
+    fun diag(): String = buildString {
+        append("[ch-diag] 澄言 Linux 运行现场\n")
+        append("so: ").append(NativeLib.summary()).append('\n')
+        append("machine: ").append(machine.get()).append('\n')
+        append("busy: ").append(state.get().busy).append("｜exit: ").append(state.get().exit).append('\n')
+        append("heap: ").append(usedHeap()).append('\n')
+        append("native: ").append(nativeInfo()).append('\n')
+        if (lastError.isNotBlank()) append("lastError:\n").append(lastError).append('\n')
+        if (!NativeLib.loaded) append('\n').append(NativeLib.detail).append('\n')
     }
 
     private fun parseState(json: String): State {

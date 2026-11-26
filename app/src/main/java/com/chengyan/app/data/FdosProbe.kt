@@ -9,12 +9,29 @@ import java.io.File
  * 结果同时落 <filesDir>/capmap.json，供诊断导出与降级决策。
  */
 object FdosProbe {
-    init { System.loadLibrary("fdosprobe") }
+    // 同样不在 <clinit> 里 loadLibrary：类初始化一旦抛异常，ART 会把本类永久标记
+    // erroneous（之后每次访问都是 NoClassDefFoundError，同一进程内无法恢复）。
+    // 探针只是可选功能，加载失败必须只是「探针不可用」，不能连累别的类。
+    @Volatile private var loadErr: String? = null
+    @Volatile private var loadTried = false
 
     external fun runAll(dataDir: String, libDir: String, debugAppdata: Boolean): String
 
+    private fun ensureLib(): String? {
+        if (loadTried) return loadErr
+        synchronized(this) {
+            if (!loadTried) {
+                loadErr = try { System.loadLibrary("fdosprobe"); null }
+                catch (t: Throwable) { "${t.javaClass.simpleName}: ${t.message}" }
+                loadTried = true
+            }
+        }
+        return loadErr
+    }
+
     /** 跑探针并写 capmap.json；返回 JSON 文本。 */
     fun run(context: android.content.Context, debugAppdata: Boolean = false): String {
+        ensureLib()?.let { return "[\"error\":\"libfdosprobe.so 加载失败：$it\"]" }
         val dir = context.applicationInfo.nativeLibraryDir
         val files = context.filesDir.absolutePath
         val json = runAll(files, dir, debugAppdata)

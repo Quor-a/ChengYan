@@ -64,7 +64,7 @@ object Tools {
                 put("parameters", buildJsonObject {
                     put("type", "object")
                     put("properties", buildJsonObject {
-                        put("action", buildJsonObject { put("type", "string"); put("description", "run=启动命令（立即返回）/ poll=查状态与输出 / wait=等退出（限时）/ restart=重建会话") })
+                        put("action", buildJsonObject { put("type", "string"); put("description", "run=启动命令（立即返回）/ poll=查状态与输出 / wait=等退出（限时）/ restart=重建会话 / info=现场自检（so 加载通路、原生窗口、会话句柄、内存）") })
                         put("command", buildJsonObject { put("type", "string"); put("description", "run 时的 busybox 命令，如 `ls /`、`echo hi > a.txt`、`wc -c a.txt`；支持引号包裹参数" ) })
                         put("timeout_secs", buildJsonObject { put("type", "number"); put("description", "wait 的最长等待秒数（默认 60，上限 600）" ) })
                     })
@@ -122,7 +122,9 @@ object LinuxTool {
                     val task = LinuxBridge.run(cmd)
                     when {
                         task == -3L -> "会话忙：上一个命令还在跑。先 poll 看状态，或 wait 等退出。"
-                        task < 0 -> "启动失败（task=$task）"
+                        // 失败必须带全文原因：只回一个 -10 等于让模型瞎猜（真机事故教训）。
+                        task < 0 -> "启动失败（task=$task）\n" +
+                            LinuxBridge.lastError.ifBlank { "（无详细原因，改用 action=info 看现场）" }
                         else -> {
                             // 短命令通常 <1s：等退出再返回（上限 5s），长任务立即返回让 AI poll
                             val deadline = System.currentTimeMillis() + 5000
@@ -151,8 +153,10 @@ object LinuxTool {
                     if (s.busy) "仍在运行（等待超时 ${timeout / 1000}s）。继续用 poll 跟踪。" else format(0, s)
                 }
                 "restart" -> if (LinuxBridge.restart()) "会话已重建（硬中断，一切清空）。"
-                    else "重建失败"
-                else -> "未知 action：$action（可用：run / poll / wait / restart）"
+                    else "重建失败\n" + LinuxBridge.lastError.ifBlank { "（无详细原因，改用 action=info 看现场）" }
+                // 现场自检：so 加载通路 / 原生窗口 / 会话句柄 / 内存。真机出问题时先跑这个。
+                "info", "diag" -> LinuxBridge.diag()
+                else -> "未知 action：$action（可用：run / poll / wait / restart / info）"
             }
         } catch (e: Throwable) {
             val st = if (e is OutOfMemoryError || e is StackOverflowError)
@@ -163,7 +167,8 @@ object LinuxTool {
 
     private fun format(task: Long, s: LinuxBridge.State): String {
         val head = if (task > 0) "任务 $task 已启动。" else ""
-        val status = if (s.busy) "状态：运行中" else "状态：已退出（exit code=${s.exit}）"
+        // 措辞很重要：「已退出」会让人以为会话死了，其实只是上一条命令跑完了。
+        val status = if (s.busy) "状态：运行中" else "状态：空闲（上一条命令 exit code=${s.exit}）"
         // 终端序列（颜色/光标控制等）对模型无意义，剥离后再给文本
         val text = stripAnsi(s.output)
         val body = when {
@@ -173,7 +178,7 @@ object LinuxTool {
             s.outputLen > 0 -> "（输出缓冲有 ${s.outputLen} 字节，但解不出可显示文本——可能全是控制序列/二进制；终端页可见）"
             else -> "（无输出；命令可能只做了重定向/副作用，exit code=${s.exit}）"
         }
-        return "[ch-linux build v1.9.7-shell]\n$head\n$status\n输出（stdout 与 stderr 合并）:\n$body"
+        return "[ch-linux build v1.9.8 | ${com.chengyan.app.data.NativeLib.summary()}]\n$head\n$status\n输出（stdout 与 stderr 合并）:\n$body"
     }
 
     /** 剥离 ANSI/VT100 转义序列：CSI 序列、OSC 及其他 ESC 引导的控制序列。 */

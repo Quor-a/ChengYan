@@ -16,9 +16,10 @@ mod jni_min;
 
 use ch_host::Session;
 use jni_min::{jclass, jlong, jstring, JNIEnv, JNINativeInterface_};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 /// JNI 入口拿到的 `env` 是「指向函数表指针的指针」，解一次引用拿到虚表。
 #[inline]
@@ -63,8 +64,20 @@ pub extern "system" fn JNI_OnLoad(
     _vm: *mut core::ffi::c_void,
     _reserved: *mut core::ffi::c_void,
 ) -> i32 {
-    ch_kernel::reserve_guest_window();
+    // 这里绝对不能 panic：`extern "system"` 里 unwind 出去会直接 abort 进程，
+    // 表现成「装得上但一加载就闪退」。窗口预留失败也只是降级到 Tier0，不该致命。
+    let _ = catch_unwind(AssertUnwindSafe(ch_kernel::reserve_guest_window));
     0x0001_0006 // JNI_VERSION_1_6：bionic 要求 >= 这版，否则视为加载失败
+}
+
+/// 取 machine 表。
+///
+/// 用 `unwrap_or_else(into_inner)` 而不是 `unwrap()`：一旦某个线程在持锁时 panic，
+/// 标准库会把这把锁标记为 poisoned，之后每次 `unwrap()` 都再 panic —— 而 panic 从
+/// JNI 函数里穿出去就是 abort（整个 App 死掉）。数据本身是 `Vec<Option<..>>`，
+/// 即使中途 panic 也仍然自洽，恢复出来继续用是对的。
+fn machines() -> MutexGuard<'static, Vec<Option<Arc<Machine>>>> {
+    MACHINES.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// 单个 machine：一个 Linux 会话（v1 = 单任务 + 环形输出缓冲）。
@@ -104,7 +117,7 @@ pub extern "system" fn Java_com_chengyan_app_data_LinuxNative_start(
         alive: Arc::new(AtomicBool::new(true)),
         next_task: AtomicU64::new(1),
     });
-    let mut g = MACHINES.lock().unwrap();
+    let mut g = machines();
     g.push(Some(m));
     g.len() as jlong // idx+1，0 保留为非法
 }
@@ -115,23 +128,36 @@ pub extern "system" fn Java_com_chengyan_app_data_LinuxNative_exec(
     env: *mut JNIEnv, _c: jclass, machine: jlong, cmd: jstring,
 ) -> jlong {
     let cmd: String = match get_string(env, cmd) { Some(s) => s, None => return -1 };
-    let m = { let g = MACHINES.lock().unwrap(); match g.get(ptr_to_idx(machine) - 1) { Some(Some(m)) => m.clone(), _ => return -2 } };
+    let m = { let g = machines(); match g.get(ptr_to_idx(machine) - 1) { Some(Some(m)) => m.clone(), _ => return -2 } };
     if m.busy.swap(true, Ordering::SeqCst) { return -3; } // 忙
-    *m.exit_code.lock().unwrap() = None;
+    *m.exit_code.lock().unwrap_or_else(|e| e.into_inner()) = None;
     // 输出缓冲**不清空**：终端要保留会话历史。
     // 旧实现每条命令都 clear，于是 `cd /tmp`（无输出）之后屏幕全空、
     // 前一条 `ls` 的结果被抹掉，用户看到的就是「终端什么都留不住」。
     // 改为追加，并回显命令行，让终端页与 AI 工具都能看到完整上下文。
-    m.out.lock().unwrap().extend_from_slice(format!("$ {cmd}\n").as_bytes());
+    m.out.lock().unwrap_or_else(|e| e.into_inner()).extend_from_slice(format!("$ {cmd}\n").as_bytes());
     let mm = m.clone();
     let task = m.next_task.fetch_add(1, Ordering::SeqCst) as jlong;
     std::thread::spawn(move || {
         // 走宿主侧 shell：支持 `|` `>` `>>` `<` `2>&1` `&&` `||` `;` `$VAR` `*` `cd` 等。
         // 旧实现按空格切开直接 `busybox <argv0>`，等于把 shell 语法全当普通参数，
         // 真机上表现为「管道/重定向/cd 全不work」，所以必须走 run_line。
-        let code = mm.session.run_line(&cmd, &mm.out);
-        mm.out.lock().unwrap().extend_from_slice(format!("\n[ch-exit {code}]\n").as_bytes());
-        *mm.exit_code.lock().unwrap() = Some(code);
+        // guest 侧任何 panic 都必须在这里吃掉：线程 panic 会把 out / exit_code 两把锁
+        // 标记 poisoned，之后 JNI 线程取锁再 panic 就从 extern "system" 穿出去 = abort 整个 App。
+        let code = catch_unwind(AssertUnwindSafe(|| mm.session.run_line(&cmd, &mm.out)))
+            .unwrap_or_else(|e| {
+                let msg = panic_msg(&e);
+                let mut g = mm.out.lock().unwrap_or_else(|e| e.into_inner());
+                g.extend_from_slice(format!("
+[ch-panic] {msg}
+").as_bytes());
+                139 // 128+11(SIGSEGV)：guest 侧崩了，明确标记
+            });
+        mm.out.lock().unwrap_or_else(|e| e.into_inner())
+            .extend_from_slice(format!("
+[ch-exit {code}]
+").as_bytes());
+        *mm.exit_code.lock().unwrap_or_else(|e| e.into_inner()) = Some(code);
         mm.busy.store(false, Ordering::SeqCst);
     });
     task
@@ -142,16 +168,16 @@ pub extern "system" fn Java_com_chengyan_app_data_LinuxNative_exec(
 pub extern "system" fn Java_com_chengyan_app_data_LinuxNative_poll(
     env: *mut JNIEnv, _c: jclass, machine: jlong,
 ) -> jstring {
-    let m = { let g = MACHINES.lock().unwrap(); match g.get(ptr_to_idx(machine) - 1) { Some(Some(m)) => m.clone(), _ => return mk_string(env, "{}") } };
+    let m = { let g = machines(); match g.get(ptr_to_idx(machine) - 1) { Some(Some(m)) => m.clone(), _ => return mk_string(env, "{}") } };
     // 环形缓冲：保留最新 384KB（此前只增不减，大输出 \u00XX 转义 6 倍膨胀直接撑爆 Java 堆）
     const OUT_CAP: usize = 384 * 1024;
     let out = {
-        let mut g = m.out.lock().unwrap();
+        let mut g = m.out.lock().unwrap_or_else(|e| e.into_inner());
         if g.len() > OUT_CAP { let drop = g.len() - OUT_CAP; g.drain(..drop); }
         g.clone()
     };
     let busy = m.busy.load(Ordering::SeqCst);
-    let exit = *m.exit_code.lock().unwrap();
+    let exit = *m.exit_code.lock().unwrap_or_else(|e| e.into_inner());
     let mut j = String::with_capacity(out.len() + 64);
     j.push_str("{\"busy\":");
     j.push_str(if busy { "true" } else { "false" });
@@ -176,7 +202,43 @@ pub extern "system" fn Java_com_chengyan_app_data_LinuxNative_poll(
 pub extern "system" fn Java_com_chengyan_app_data_LinuxNative_stop(
     _env: *mut JNIEnv, _c: jclass, machine: jlong,
 ) {
-    let mut g = MACHINES.lock().unwrap();
+    let mut g = machines();
     let i = ptr_to_idx(machine) - 1;
     if i < g.len() { g[i] = None; }
+}
+
+/// `Any` → 一行可读的 panic 说明（不含栈，栈在 guest 输出里没意义）。
+fn panic_msg(e: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = e.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = e.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "non-string panic".into()
+    }
+}
+
+/// 原生自检：so 已加载后由 Kotlin 侧 `action=info` / 终端「自检」按钮调用。
+///
+/// `window` 是 Tier1 恒等映射窗口（0x400000..64MB）在本进程里能否预留成功 ——
+/// 这是「原生执行」能不能成立的前提，而 VMM 里永远测不出来（Android 的 ART/zygote
+/// 可能已经占了那块地址，真机与 VM 是两套布局）。`tier1` 是原生执行成功次数。
+#[no_mangle]
+pub extern "system" fn Java_com_chengyan_app_data_LinuxNative_info(
+    env: *mut JNIEnv, _c: jclass,
+) -> jstring {
+    let text = catch_unwind(AssertUnwindSafe(|| {
+        let live = machines().iter().filter(|s| s.is_some()).count();
+        format!(
+            "abi={} window={} tier1={} fallback={} machines={} v={}",
+            std::env::consts::ARCH,
+            if ch_kernel::window_reserved() { "ok" } else { "failed" },
+            ch_host::native::tier1_hits(),
+            ch_host::native::tier1_fallbacks(),
+            live,
+            env!("CARGO_PKG_VERSION"),
+        )
+    }))
+    .unwrap_or_else(|_| "info: panic".to_string());
+    mk_string(env, &text)
 }

@@ -61,7 +61,11 @@ fun TerminalScreen(onBack: () -> Unit) {
     // 进入终端页就确保会话已建立（否则 poll 在 machine<=0 时直接返回空状态，
     // 首次打开必须等用户输入命令才有输出，看起来像"终端坏了"）。
     LaunchedEffect(Unit) {
-        runCatching { LinuxBridge.ensure() }.onFailure { error = "会话启动失败：${it.message}" }
+        val r = runCatching { LinuxBridge.ensure() }.getOrElse {
+            error = "会话启动失败：${it.javaClass.simpleName} ${it.message}"
+            return@LaunchedEffect
+        }
+        if (r <= 0) error = LinuxBridge.lastError.ifBlank { "会话启动失败（$r）" }
     }
     // 150ms 轮询 native 输出。poll 的结果写进 stateFlow，页面收集它才会重组刷新——
     // 旧实现读 LinuxBridge.current()（AtomicReference）不触发重组，输出永远停在首帧。
@@ -90,8 +94,12 @@ fun TerminalScreen(onBack: () -> Unit) {
         history = history + cmd
         histIdx = -1
         val r = LinuxBridge.run(cmd)
-        if (r < 0) error = if (r == -3L) "会话忙：上一个命令还在运行（等退出或点「重建会话」）" else "启动失败（$r）"
-        else error = null
+        if (r < 0) {
+            error = when {
+                r == -3L -> "会话忙：上一个命令还在运行（等退出或点「重建会话」）"
+                else -> LinuxBridge.lastError.ifBlank { "启动失败（$r）" }
+            }
+        } else error = null
     }
 
     Column(Modifier.fillMaxSize().background(Ink)) {
@@ -105,7 +113,9 @@ fun TerminalScreen(onBack: () -> Unit) {
             Text("Linux 终端", color = TermFg, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, fontFamily = FontCJK)
             Spacer(Modifier.weight(1f))
             Text(
-                if (st.busy) "● 运行中" else if (st.exit != null) "○ 退出 ${st.exit}" else "○ 空闲",
+                // 会话是「常驻」的：一条命令跑完只是那次任务结束，不是终端死了。
+                // 旧文案「退出 N」让用户以为整个 Linux 挂了（真机误判的源头之一）。
+                if (st.busy) "● 运行中" else if (st.exit != null) "○ 就绪（上次 ${st.exit}）" else "○ 就绪",
                 color = if (st.busy) Ok else Ink3, fontSize = 12.sp, fontFamily = FontCJK
             )
         }
@@ -118,7 +128,7 @@ fun TerminalScreen(onBack: () -> Unit) {
                 // 输出缓冲现在跨命令累积（保留会话历史），但 Compose 每 150ms 轮询时
                 // 对全量文本做布局会明显卡顿。只渲染尾部窗口，历史仍可通过滚动查看近期内容。
                 val window = st.output.drop(from).let { if (it.length > 30_000) it.takeLast(30_000) else it }
-                val text = (probeOut?.let { it + "\n\n" } ?: "") + renderOut(window, st.busy, st.exit)
+                val text = (probeOut?.let { it + "\n\n" } ?: "") + renderOut(window)
                 Text(
                     text.ifBlank {
                         "澄言 Linux · 进程内 busybox（ARM64 二进制翻译，无 root）\n输入命令回车执行。试：ls / 或 echo hello"
@@ -164,6 +174,8 @@ fun TerminalScreen(onBack: () -> Unit) {
             }
             QuickKey("^C") { LinuxBridge.restart(); clearAt = 0 }
             Spacer(Modifier.weight(1f))
+            // 自检：so 加载通路 / 原生窗口预留 / 会话句柄 / 内存，一次全打出来。
+            QuickKey("自检") { error = LinuxBridge.diag() }
             QuickKey("重建") { LinuxBridge.restart(); clearAt = 0 }
             Spacer(Modifier.width(8.dp))
             QuickKey("探针") {
@@ -219,7 +231,7 @@ private fun QuickKey(label: String, onClick: () -> Unit) {
 }
 
 /** 输出渲染：剥 ANSI 转义序列（CSI/OSC），保留可见文本，附退出状态行。 */
-private fun renderOut(out: String, busy: Boolean, exit: Int?): String {
+private fun renderOut(out: String): String {
     val sb = StringBuilder(out.length)
     var i = 0
     while (i < out.length) {
@@ -252,6 +264,7 @@ private fun renderOut(out: String, busy: Boolean, exit: Int?): String {
             i++
         }
     }
-    val status = if (busy) "" else if (exit != null) "\n—— 已退出（$exit）——" else ""
-    return sb.toString() + status
+    // 每条命令的结果由 native 侧在输出里追加 `[ch-exit N]`，这里不再额外画一行
+    // 「—— 已退出（N）——」：那行会让终端看起来"进程结束了"，实际会话还活着。
+    return sb.toString()
 }

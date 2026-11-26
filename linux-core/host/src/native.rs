@@ -235,6 +235,14 @@ static PROBING: AtomicBool = AtomicBool::new(false);
 static HOST_SP: AtomicU64 = AtomicU64::new(0);
 static BUSY: AtomicBool = AtomicBool::new(false);
 
+/// Tier1 原生执行成功次数（真机自检要看这个：`tier1>0` 才证明原生通道在 App 进程里成立）。
+pub static TIER1_HITS: AtomicU64 = AtomicU64::new(0);
+/// Tier1 没能启动、回落解释器的次数（恒等映射抢不到 / execmem 被拒等）。
+pub static TIER1_FALLBACK: AtomicU64 = AtomicU64::new(0);
+
+pub fn tier1_hits() -> u64 { TIER1_HITS.load(Ordering::Relaxed) }
+pub fn tier1_fallbacks() -> u64 { TIER1_FALLBACK.load(Ordering::Relaxed) }
+
 #[repr(align(16))]
 struct AltStack([u8; 64 * 1024]);
 static mut ALTSTACK: AltStack = AltStack([0; 64 * 1024]);
@@ -468,6 +476,7 @@ pub fn available(proc: &Process) -> bool {
 /// 安全地回落解释器。
 pub fn run(proc: &mut Process, sp: u64) -> Result<i32, String> {
     if !available(proc) {
+        TIER1_FALLBACK.fetch_add(1, Ordering::Relaxed);
         return Err("内存不是恒等映射".into());
     }
     if BUSY.swap(true, Ordering::AcqRel) {
@@ -551,6 +560,7 @@ pub fn run(proc: &mut Process, sp: u64) -> Result<i32, String> {
             t0, t1, sites.len(), entry, sp, prot as u32
         );
     }
+    TIER1_HITS.fetch_add(1, Ordering::Relaxed);
     PROBING.store(true, Ordering::Release);
     let rc = unsafe { ch_setjmp(std::ptr::addr_of_mut!((*ctx).jb) as *mut u64) };
     if rc == 0 {
