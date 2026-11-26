@@ -104,8 +104,20 @@ extern "C" fn reserve_at_load() {
     reserve_guest_window();
 }
 
+/// **只给静态可执行文件（桌面 runner / 交叉编译的 shell）用。**
+///
+/// Android 上绝对不能挂 `.init_array`：那是 `dlopen` 期间执行的，此时 bionic
+/// 的 linker 还持着锁、Rust std 的 TLS/stdio/环境变量访问都不可靠。实测
+/// v1.9.7 加了这条之后 `System.loadLibrary("chlinux")` 直接失败 ——
+/// `LinuxNative` 的 `<clinit>` 抛异常 → 类被标记 erroneous → 之后每次访问都是
+/// `NoClassDefFoundError: com.chengyan.app.data.LinuxNative`（终端报「会话启动失败」）。
+/// 对比历史产物可证：v1.9.6 的 so 没有 DT_INIT_ARRAY，v1.9.7 有 1 项。
+///
+/// Android 改走 `JNI_OnLoad`（见 jnihost），由 JVM 在 dlopen 成功返回后调用，
+/// 时机同样早于任何 native 调用，且环境完全就绪。
 #[used]
-#[cfg_attr(any(target_os = "linux", target_os = "android"), link_section = ".init_array")]
+#[cfg(target_os = "linux")]
+#[link_section = ".init_array"]
 static RESERVE_AT_LOAD: extern "C" fn() = reserve_at_load;
 
 pub fn window_reserved() -> bool {

@@ -51,6 +51,22 @@ fn get_string(env: *mut JNIEnv, s: jstring) -> Option<String> {
     }
 }
 
+/// so 加载完成后由 JVM 调用（dlopen 成功返回之后、任何 Java 侧 native 调用之前）。
+///
+/// 在这里做 guest arena 窗口预留。**不能放 `.init_array`**：那是 dlopen 内部执行的，
+/// bionic linker 还持锁、Rust std 的 TLS/stdio/env 都不可靠，实测会让
+/// `System.loadLibrary("chlinux")` 直接失败（表现为 `<clinit>` 抛异常 →
+/// `NoClassDefFoundError: com.chengyan.app.data.LinuxNative`，终端报「会话启动失败」）。
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn JNI_OnLoad(
+    _vm: *mut core::ffi::c_void,
+    _reserved: *mut core::ffi::c_void,
+) -> i32 {
+    ch_kernel::reserve_guest_window();
+    0x0001_0006 // JNI_VERSION_1_6：bionic 要求 >= 这版，否则视为加载失败
+}
+
 /// 单个 machine：一个 Linux 会话（v1 = 单任务 + 环形输出缓冲）。
 struct Machine {
     session: Session,
