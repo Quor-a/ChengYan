@@ -38,9 +38,11 @@
 //! ## 退出怎么回宿主
 //!
 //! guest 的栈在我们的 arena 里，宿主 Rust 的帧在宿主栈上，两者不是一条栈。
-//! 退出时用 `siglongjmp` 回到 `run()` 里的 `sigsetjmp` 点：它会把 aarch64 的
-//! 被调用者保存寄存器（x19-x28/x29/x30/sp **以及 d8-d15**）整套恢复，
-//! 手工 `ret` 是做不到的（`ret` 恢复不了 d8-d15，宿主浮点局部变量会被污染）。
+//! 退出时用自实现的 `ch_longjmp` 回到 `run()` 里的 `ch_setjmp` 点（见下方 global_asm）：
+//! 它把 aarch64 的被调用者保存寄存器（x19-x28/x29/x30/sp **以及 d8-d15**）整套恢复。
+//! 只 `ret` 是不够的 —— `ret` 恢复不了 d8-d15，宿主浮点局部变量会被 guest 污染。
+//! 不用 libc 的 sigsetjmp/siglongjmp：musl 只导出 `__sigsetjmp`、bionic 只导出
+//! `sigsetjmp`，同一个 `link_name` 在 Android 上会让 dlopen 直接失败。
 //!
 //! ## 宿主 TLS 必须切换
 //!
@@ -113,19 +115,76 @@ struct StackT {
 extern "C" {
     fn sigaction(sig: i32, act: *const SigAction, old: *mut SigAction) -> i32;
     fn sigaltstack(ss: *const StackT, old: *mut StackT) -> i32;
-    fn siglongjmp(env: *mut u8, val: i32) -> !;
+    fn sigprocmask(how: i32, set: *const u8, old: *mut u8) -> i32;
 }
 
-// bionic 把 sigsetjmp 做成了 `#define sigsetjmp(env, save) __sigsetjmp((env), (save))`，
-// 只导出 __sigsetjmp；musl 有真的 sigsetjmp 符号。
-#[cfg(target_os = "android")]
+// ---- setjmp / longjmp：自己实现，不用 libc ----
+//
+// 这是被真机打回来过的坑，写清楚免得再踩：
+//   * musl 的 `sigsetjmp` 是**宏**，展开成 `__sigsetjmp`，只导出 `__sigsetjmp`；
+//   * bionic（Android）导出的是**真函数** `sigsetjmp`，没有 `__sigsetjmp`。
+//
+// 之前用 `#[link_name = "__sigsetjmp"]` 迁就 musl，Android 上 `dlopen` 直接报
+//
+//     dlopen failed: cannot locate symbol "__sigsetjmp" referenced by libchlinux.so
+//
+// → `System.loadLibrary` 失败 → `LinuxNative.<clinit>` 抛异常 → 类被标记 erroneous
+// → 之后每次访问都是 `NoClassDefFoundError: com.chengyan.app.data.LinuxNative`
+// → 终端报「会话启动失败」。同一个 link_name 不可能同时满足两个 libc，所以自己写。
+//
+// 语义与标准 `sigsetjmp(env, 1)` 等价，只是**不碰 signal mask**（那部分由 `bail()`
+// 里显式 `sigprocmask(SIG_UNBLOCK)` 处理）。
+// 保存 callee-saved：x19-x28 / x29(fp) / x30(lr) / sp / d8-d15（v8-v15 只有低 64 位需要）。
+// 布局：x19..x30 共 12 个 u64 @0..96（每对 stp 16 字节），sp @96，d8..d15 @104..160。
+// `JmpBuf` 给的是 512 字节，够。
+
+#[cfg(target_arch = "aarch64")]
+core::arch::global_asm!(
+    ".text",
+    ".global ch_setjmp",
+    ".type ch_setjmp, %function",
+    "ch_setjmp:",
+    "stp x19, x20, [x0, #0]",
+    "stp x21, x22, [x0, #16]",
+    "stp x23, x24, [x0, #32]",
+    "stp x25, x26, [x0, #48]",
+    "stp x27, x28, [x0, #64]",
+    "stp x29, x30, [x0, #80]",
+    "mov x9, sp",
+    "str x9, [x0, #96]",
+    "stp d8,  d9,  [x0, #104]",
+    "stp d10, d11, [x0, #120]",
+    "stp d12, d13, [x0, #136]",
+    "stp d14, d15, [x0, #152]",
+    "mov w0, #0",
+    "ret",
+    ".size ch_setjmp, .-ch_setjmp",
+    ".global ch_longjmp",
+    ".type ch_longjmp, %function",
+    "ch_longjmp:",
+    "ldp x19, x20, [x0, #0]",
+    "ldp x21, x22, [x0, #16]",
+    "ldp x23, x24, [x0, #32]",
+    "ldp x25, x26, [x0, #48]",
+    "ldp x27, x28, [x0, #64]",
+    "ldp x29, x30, [x0, #80]",
+    "ldr x9, [x0, #96]",
+    "mov sp, x9",
+    "ldp d8,  d9,  [x0, #104]",
+    "ldp d10, d11, [x0, #120]",
+    "ldp d12, d13, [x0, #136]",
+    "ldp d14, d15, [x0, #152]",
+    "mov x0, x1",
+    "cbnz x0, 1f",
+    "mov w0, #1",
+    "1:",
+    "ret",
+    ".size ch_longjmp, .-ch_longjmp",
+);
+
 extern "C" {
-    #[link_name = "__sigsetjmp"]
-    fn sigsetjmp(env: *mut u8, save: i32) -> i32;
-}
-#[cfg(not(target_os = "android"))]
-extern "C" {
-    fn sigsetjmp(env: *mut u8, save: i32) -> i32;
+    fn ch_setjmp(buf: *mut u64) -> i32;
+    fn ch_longjmp(buf: *const u64, val: i32) -> !;
 }
 
 fn read_tpidr() -> u64 {
@@ -194,7 +253,14 @@ fn uc_sc(uc: *mut u8) -> *mut KSigContext {
 unsafe fn bail(ctx: *mut Ctx, code: i32) -> ! {
     (*ctx).code = code;
     write_tpidr((*ctx).host_tls);
-    siglongjmp(std::ptr::addr_of_mut!((*ctx).jb) as *mut u8, 1)
+    // 处理器执行期间内核把 SIGTRAP 加进了 mask，正常返回靠 sigreturn 还原；
+    // 我们是跳出去、不经过 sigreturn，所以必须手动解除。不然回到宿主后
+    // guest 后续所有 `brk #0` 都不再触发 handler，Tier1 就此静默挂死。
+    const SIG_UNBLOCK: i32 = 1;
+    let mut set = [0u64; 16];
+    set[0] = 1u64 << (SIGTRAP - 1);
+    sigprocmask(SIG_UNBLOCK, set.as_ptr() as *const u8, std::ptr::null_mut());
+    ch_longjmp(std::ptr::addr_of_mut!((*ctx).jb) as *mut u64 as *const u64, 1)
 }
 
 /// SIGTRAP：`brk #0` = guest 执行了被改写过的 svc。
@@ -486,7 +552,7 @@ pub fn run(proc: &mut Process, sp: u64) -> Result<i32, String> {
         );
     }
     PROBING.store(true, Ordering::Release);
-    let rc = unsafe { sigsetjmp(std::ptr::addr_of_mut!((*ctx).jb) as *mut u8, 1) };
+    let rc = unsafe { ch_setjmp(std::ptr::addr_of_mut!((*ctx).jb) as *mut u64) };
     if rc == 0 {
         unsafe { enter(entry, sp) };
     }
