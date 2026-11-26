@@ -1,0 +1,177 @@
+# Appine vs ChengYan：完整代码级对比（2026-11-26）
+
+对象：`github.com/mthli/appine`（全量 clone，1091 文件 / 35MB） vs 本仓 `linux-core` + `app`。
+本文所有数字都是**当场统计出来的**，不是印象。统计口径写在每节里，可复算。
+
+---
+
+## 0. 一句话结论
+
+**两者不是同一个物种。** Appine 是一个跑在 App 进程里的**完整 Linux 内核实现**
+（软 MMU + 真 DBT + 真 PTY + 265 个 syscall + 网络栈 + cgroup + seccomp），
+ChengYan 是**「宿主侧 shell + 单进程 aarch64 解释器」**：它把 busybox 的某个 applet
+装进一块恒等映射内存跑完、收走输出，再跑下一个。
+
+所以「照 Appine 搬功能」这个说法本身是错的：能搬的只有**工程纪律**（日志、panic 隔离、
+句柄语义、错误不吞），不能搬的是**架构**（软 MMU / 进程模型 / PTY），那是重写内核。
+
+---
+
+## 1. 规模（可复算）
+
+| 项 | Appine | ChengYan | 统计命令 |
+|---|---|---|---|
+| Rust | **168,473 行** / 113 文件 | **7,970 行** / 17 文件 | `find -name '*.rs' \| xargs wc -l` |
+| C / H | **47,874 行** / 99 文件 | 0 | `find -name '*.c' -o -name '*.h'` |
+| Kotlin | **20,973 行** / 60 文件 | **9,223 行** / 37 文件 | `find -name '*.kt' \| xargs wc -l` |
+| 设计决策文档 | **377 份 .md**（`.agents/decisions/*` 152 份） | 0（只有代码注释） | `find .agents -name '*.md'` |
+| 合计代码量 | ≈ **237,000 行** | ≈ **17,200 行** | |
+
+倍数关系：**约 14 倍**。这不是「补几个补丁」的量级。
+
+---
+
+## 2. 引擎（怎么执行 guest 指令）
+
+| | Appine | ChengYan |
+|---|---|---|
+| 文件 | `core/engine/src/c/` 13,875 行 C：`dbt.c` 1692 / `dbt_loop.c` 1725 / `dbt_translate.c` 1370 / `dbt_cache.c` 1281 / `interp.c` 1067 / `simd.c` 1072 / `mmu.c` 470 / `native.c` 298 / `guard.c` 370 | `linux-core/engine/src/interp.rs` 2,014 行 + `host/src/native.rs` 582 行 |
+| Tier0 | 解释器（完整 aarch64，含 SIMD/FP/原子） | 解释器（子集，够跑 busybox） |
+| Tier1 | **真 DBT**：把 guest 基本块翻译成宿主指令、缓存成 executable block（`dbt_cache.c`），另有 `native.c` 把 SIMD/CRC32/LSE 原子指令**直接交给宿主 CPU 执行同一条编码** | **不是 DBT**：扫 `.text` 把 `svc #0`(0xD4000001) 改写成 `brk #0`(0xD4200000)；SIGTRAP handler 里组装寄存器调内核，`pc+=4` 返回 |
+| 代码页 W^X | `appine_map_code()`：`mmap` 一份 `MAP_SHARED` 匿名再 `mremap` 出**第二个别名**，一个 RW 写、一个 RX 执行 | 单个 arena：`mmap(RW)` → 装段 → `mprotect` 成 R-X；代码尾页与可写段共页时退 RWX |
+| 已知风险 | — | ① 恒等映射要求宿主 `0x400000..64MB` 空闲（`arch_randomize_brk` 会把堆压进来，实测 4~8% 间歇失败，靠 `.init_array`/`JNI_OnLoad` 提前 `PROT_NONE` 预留对抗）；② 共页 RWX 在 Android 可能被 execmem 检查拒绝 → 整条 Tier1 回落解释器（**静默变慢，不会崩**） |
+
+**关键差别**：Appine 的 Tier1 不占宿主任何固定的低地址，因为它有软 MMU；
+我们的 Tier1 必须让 guest 虚拟地址 == 宿主虚拟地址，所以天生与 ART/zygote 的地址布局抢地盘。
+「VM 全绿 ≠ 真机能起」的根源就在这一行。
+
+---
+
+## 3. 内存（guest 地址怎么变成宿主地址）
+
+| | Appine | ChengYan |
+|---|---|---|
+| 文件 | `core/kernel/src/mm.rs` **12,969 行** + `engine/mmu.c` 470 行 | `kernel/src/lib.rs` 的 `GuestMem`（约 200 行）+ `host/src/native.rs` |
+| 模型 | **软件页表 + TLB**（1024 项 stlb、2MiB superpage），guest 虚拟地址由自己的页表翻译 → guest 内存**不在 App 地址空间里** | **恒等映射**：整块 `0x400000..64MB` 直接 mmap 给 guest 用，guest 地址就是宿主地址；失败回落 flat `Vec<u8>` |
+| 后果 | 永不与宿主布局冲突；多进程各自地址空间天然成立 | 单进程独占那块窗口 ⇒ **不可能同时有两个 live guest 进程**（fork 在架构上不成立） |
+| COW / 按需分页 | 有（`mm::Fill`、FUSE 文件页缺页回填） | 无（一次性 map + 清零） |
+
+---
+
+## 4. ELF 装载
+
+| | Appine | ChengYan |
+|---|---|---|
+| 文件 | `core/kernel/src/loader.rs` **1,988 行** | `core/kernel/src/elf.rs` **150 行** |
+| 支持 | `ET_EXEC` + `ET_DYN` + `PT_INTERP`（动态链接器，如 `ld-musl`）+ `PT_NOTE`/`PT_GNU_PROPERTY`（找 Go buildid）+ **vDSO 映射** + 按 arm64 Linux 原样的 auxv 条目与顺序 | **只 ET_EXEC 静态** |
+| 语义对齐 | 按 6.1 `load_elf_binary` 的前/后分界：提交点前失败 = execve 失败；映射期失败 = `Image::doomed`，提交后按 SIGSEGV 杀掉 | 只做「读 PT_LOAD → memcpy → 建栈」 |
+| 动态链接程序 | 可跑 | **跑不了**（无 PT_INTERP） |
+
+这是一条**用户可见的能力边界**：rootfs 里只有 `busybox.static`，任何动态链接的程序
+（`apk` 装的包、自己编的 hello、glibc 二进制）在我们这里直接失败。
+
+---
+
+## 5. syscall
+
+| | Appine | ChengYan |
+|---|---|---|
+| 顶层 match 覆盖编号数 | **265**（编号到 451，含 pidfd/statmount 等新接口） | **62** |
+| 分布 | `syscall/fs.rs` 12,440 行、`net.rs` 5,839、`poll.rs` 3,805、`fuse.rs` 3,951、`proc.rs` 2,270、`mount.rs` 1,973、`misc.rs` 1,646、`inotify.rs` 1,442 …共 30 个文件 | 单文件 `syscall.rs` 约 1,100 行 |
+| 进程相关 | `clone`/`clone3`(220)、`execve`(221)、`execveat`(281)、`wait4`(260)、`futex`(98)、`set_robust_list`(99)、`ptrace`(117) 全有 | **全无**（220/221/260/98/99/117 都不在表里） |
+| 未实现时的表现 | 按 Linux 语义返回 ENOSYS 并进 kernel log | 返回 ENOSYS（本轮之前**完全静默**，现在会计数上报） |
+
+`220/221/260` 缺失的直接后果：**guest 里不能自己 fork/exec**。现在 `ls`、`cat`、`awk`
+能跑，是因为**宿主侧 shell（`host/src/shell.rs`，911 行）替 guest 做了这些事**：
+它自己分词/展开/glob/重定向，把每一段翻译成 `busybox <applet> <args>` 交给引擎。
+所以 `sh script.sh`、`busybox sh -c '...'` 里一旦 applet 自己调 fork/exec，就断在这里。
+
+---
+
+## 6. 进程 / 线程 / 信号
+
+| | Appine | ChengYan |
+|---|---|---|
+| 文件 | `task.rs` 1,449 + `process.rs` + `signal.rs` 2,336 + `futex.rs` + `pidns.rs` + `ptrace.rs` + `seccomp.rs` 1,830 | 无 |
+| 模型 | 线程组（`ThreadGroup`）+ 每线程 `Task` + 内核态线程调度 + BKL（`kernel.rs` 2,085 行） | 单 `Process` 结构体，一次跑一条命令，跑完取输出 |
+| 信号 | 完整：handler/sigaltstack/siginfo/实时信号/作业控制（Ctrl-C 进前台进程组） | `rt_sigaction`/`rt_sigprocmask`/`sigaltstack` 一律**返回 0 但不落地**：注册的 handler 永远不会被调用 |
+| 结果 | 程序能被打断、能自己装 handler | 长命令无法中断（终端页那个「重建」键是硬重建整个会话） |
+
+---
+
+## 7. 终端（PTY）
+
+| | Appine | ChengYan |
+|---|---|---|
+| 文件 | `tty.rs` 2,300 + `terminal.rs` 651 + `pseudo.rs` 6,553 里的一部分 + `hosts/android/vt.rs` 2,124（终端模拟器）+ Kotlin `VtView.kt` 2,257、`TerminalService.kt` 1,557 | 无 |
+| 模型 | **进程内真 PTY**：`open_console` → `/dev/pts/N`，`spawn` 时把 slave 当 0/1/2 并设为控制终端；行规程（ICANON/ECHO）、`^C` → SIGINT 给前台进程组、`resize` 全在 | **没有 fd 级 PTY**：宿主把命令输出收成 `Vec<u8>` 交给 UI 显示，输入整行提交 |
+| 可见差别 | `less`/`vi`/`top` 能用；`isatty()` 为真；作业控制成立 | 全屏 TUI 程序无法工作；`isatty()` 为假；无 `^C` |
+
+---
+
+## 8. Android 宿主层（JNI + Kotlin）
+
+| | Appine | ChengYan |
+|---|---|---|
+| JNI 导出 | **42 个** `Java_io_github_mthli_appine_Native_*`（init/importRootfs/browse*/openConsole/spawn/read/write/resize/waitFor/takePower/shutdown …） | **8 个**（init/start/exec/poll/stop/info/lastError/logTail） |
+| JNI 文件 | `hosts/android/src/lib.rs` 1,420 行（jni crate） | `jnihost/src/lib.rs` 446 行 + 手写 `jni_min.rs` 972 行（不依赖 jni crate） |
+| panic 隔离 | `guarded!` 宏：每个 JNI 入口 catch_unwind，panic → 抛 Java 异常或返回值 | 同上（本轮之前已有）；`JNI_OnLoad` 也包了 |
+| native 日志 | `redirect_stderr`：pipe + 读取线程 → logcat | **v1.9.9 起有**：pipe + 读取线程 → logcat + **96KB 内存环形缓冲**，Kotlin `logTail(n)` 直接取，不用 adb |
+| so 加载 | `Native.kt` 的 `init { System.loadLibrary("appine"); init(DEBUG) }`（有 clinit 中毒风险） | `NativeLib`：三通路（loadLibrary → nativeLibraryDir → APK 抽出）+ 逐条记录报错 + 可重试；类里**不写 `init{}`** |
+| 打包 | `useLegacyPackaging = false`（APK 内直映射，NDK 29 保证 16KB 对齐）、minSdk 30 | `extractNativeLibs=true` + `useLegacyPackaging = true`（安装期解包，抗第三方安装器重打包）、minSdk 26 |
+| 应用级初始化 | `MainApplication.onCreate`；`:venus`(GPU) 独立进程 | `ChengYanApp.onCreate` 初始化 `LinuxBridge` |
+
+---
+
+## 9. 其它子系统（Appine 有、我们没有）
+
+`net.rs` 4,627 / `netns.rs` 3,671 / `netdev.rs` 3,940 / `nft.rs` 5,230（防火墙）/
+`cgroup.rs` 2,140 / `vfs/` 合计 20,000+（含 overlay、FUSE、inode store）/
+`unix.rs` 1,740（unix socket）/ `ipc.rs`（shm、msg、sem）/ `bpf.rs` / `watchdog.rs` /
+`inittab.rs`（开机流程）/ `gpu.rs` + `hosts/android/gpu.rs` 544（virgl 直通）/
+`coredump.rs` / `loadavg.rs` / `vdso.rs` / `uaccess.rs`（SIGSEGV 修 uaccess 缺页）
+
+我们的对应物只有：`openat/read/write/stat/getdents/mkdir/rename/...` 62 个 syscall 直接透传宿主文件系统
+（`path.rs` 123 行做 jail + 绝对软链重定向 + 16 跳上限），socket 6 个直通宿主 socket。
+
+---
+
+## 10. 那么「搬什么」是有意义的
+
+按投入产出排序，**能搬且值得搬**的只有工程纪律，我们已搬完 7 条：
+
+1. stderr → logcat + 内存环形缓冲（v1.9.9）— 否则真机排障全靠静态反推
+2. 每个 JNI 入口 catch_unwind（v1.9.9）
+3. 句柄失效后调用必须安全返回、槽位复用（v1.9.9）
+4. 句柄表条目在锁外 drop（v1.9.9）
+5. 错误不吞成裸数字（`LAST_ERROR` 全文，v1.9.9）
+6. 热路径不碰 `std::env`（v1.9.10，`getenv` + `OnceLock`）
+7. 未实现 syscall 计数上报（v1.9.10，`unimpl=nr:次数`）
+
+**不能搬**（需要重写内核，不是补丁）：
+软 MMU（→ 才可能 fork/多进程、才不抢宿主地址）、真 DBT、真 PTY、完整信号/线程模型。
+这四项任缺一项，都实现不了 Appine 那种「一个 tab 一个真 shell 进程、能 Ctrl-C、
+能跑 vi」的终端。
+
+---
+
+## 11. 当前能力边界（诚实清单）
+
+能：`echo/ls/cat/grep/sed/awk/sort/uniq/head/tail/wc/find/cp/mv/rm/mkdir/touch`、
+管道、重定向（`> >> < 2> 2>&1 &>`）、`; && ||`、单双引号、`$VAR ${VAR} $?`、`~`、
+glob（`* ? []`）、`cd/pwd/export/unset`、`cp/mv` 跨目录、越狱防护。
+
+不能：`$(...)`、`for/while/if`、函数、真后台 `&`、`vi/less/top`（无 tty）、
+`^C` 中断、动态链接程序、`apk add`（无包管理器 + 无动态链接器）、
+guest 内部 fork/exec（`sh script.sh` 里 applet 自己 exec 会断）。
+
+---
+
+## 12. 本轮实测数据（aarch64 VM，qemu + Alpine 真内核）
+
+47 项矩阵两遍：**45 × exit 0 + 2 × 故意负例 exit 1**，无 panic。
+未实现 syscall 报表在 47 例里**一次都没出现**——即该矩阵范围内内核不缺 syscall
+（唯一挖出来的 `umask(166)` 已补，用于 `mkdir -p`）。
+新增 4 例无界生产者（`yes|head`、`yes|head -c 16|wc -c`、`yes|head -5|wc -l`、
+`yes|tail -1|head -1`）全部输出正确且不再挂死——这是本轮唯一一处「真机可能表现为
+终端卡死」的实际缺陷。
