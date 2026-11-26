@@ -7,22 +7,11 @@ captures/
 .externalNativeBuild/
 .cxx/
 
-# Rust 引擎编译产物 / 临时日志
-linux-core/target/
-linux-core/*.log
+# 构建产物 / 日志
 *.apk
 build_*.log
 test_*.log
 
-# 交叉编译用的 aarch64 musl 运行库快照（2.2MB 二进制，按需重建）
-_a64lib/
-# 手工链接实验产物
-_mintest_dyn
-_vm_out*.log
-_vm_final.log
+# 本地交叉编译实验目录（不参与 APK 构建；现役用户空间是预编译 Alpine 3.24 rootfs）
 toolchain/
-userspace-build/busybox-1.37.0/
-userspace-build/busybox.tar.bz2
-userspace-build/t*
-userspace-build/zt*
-userspace-build/out/
+userspace-build/

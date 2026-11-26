@@ -60,7 +60,15 @@ python scripts/gate-userspace.py    # 门禁：验 APK 内全套 so 是 aarch64 
 | 终端黑屏但环境就绪 | proot 经 bash 中转，PEEKDATA 失败 | proot 直挂 PTY |
 | 修了没变化 | rootfs marker/asset stamp 没升版 | 改资产内容必须升 ASSET_VERSION / marker |
 
-## 6. 下一步
+## 6. 仓库布局说明（避免接手方误判）
+
+- `app/` — **唯一现役工程**，所有终端代码与资产都在这里。
+- `scripts/gate-userspace.py` — 构建门禁，出包前必跑。
+- `chengyan-android/` — 历史源码副本（36 文件），**不参与构建**（settings.gradle.kts 只 include `:app`），仅作参考，勿在其上开发。
+- `toolchain/`、`userspace-build/` — 本地交叉编译实验残留，已被 .gitignore 排除，不入库；现役用户空间是 `app/src/main/assets/alpine-minirootfs-3.24.0-aarch64.tar.gz`（预编译资产）。
+
+## 7. 下一步
+
 
 1. 真机装 APK，观察首启动解压进度与最终是否进 Alpine ash（提示符）。
 2. 若失败：点终端「自检」按钮看 `LinuxBridge.diag()` 输出（rootfs/tarball/cyBash/proot/loader/ptyAlive/lastError）。
