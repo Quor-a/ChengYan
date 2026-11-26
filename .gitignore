@@ -20,3 +20,9 @@ _a64lib/
 _mintest_dyn
 _vm_out*.log
 _vm_final.log
+toolchain/
+userspace-build/busybox-1.37.0/
+userspace-build/busybox.tar.bz2
+userspace-build/t*
+userspace-build/zt*
+userspace-build/out/
