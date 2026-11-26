@@ -157,14 +157,9 @@ object ProotBridge {
                 }
                 marker.writeText(ROOTFS_VERSION)
             }
-            // 兜底：即使 marker 匹配（跳过解包），也必须保证 busybox 可执行。
-            // 旧版本解包出来的 rootfs 没有执行位，不修就会一直报 '/bin/sh' is not executable。
-            val busybox = File(rootfs, "bin/busybox")
-            if (busybox.exists() && !busybox.canExecute()) {
-                try { android.system.Os.chmod(busybox.path, 0b111101101) } catch (_: Throwable) {
-                    busybox.setExecutable(true)
-                }
-            }
+            // rootfs/bin/busybox 保持 tar 解包出来的实体文件（0755）。
+            // filesDir 是 noexec：真正执行时不走它，而是 proot -b 把
+            // nativeLibraryDir/libcybusybox.so 绑进 guest 的 /.cybin 后执行那份。
             return true
         } catch (e: Throwable) {
             lastError = "资产准备失败：${e::class.simpleName} ${e.message}"
@@ -205,23 +200,29 @@ object ProotBridge {
                 //（系统安装到有 exec 权限的路径），再用 proot -b 绑到 guest 的 /bin/busybox。
                 // guest 的 /bin/sh 软链 → /bin/busybox → 实际执行 nativeLibraryDir 那份。
                 val busyboxSo = File(nativeLibDir, "libcybusybox.so")
-                val busyboxBind = if (busyboxSo.exists()) {
-                    listOf("-b", "${busyboxSo.absolutePath}:/bin/busybox")
-                } else emptyList()
-                val cmd = listOf(
-                    proot.absolutePath,
-                    "-0",
+                // filesDir noexec：guest 里任何实体文件都 execve 不了。
+                // 把 nativeLibraryDir bind 到 guest 的 /.cybin，直接执行 bind 进来的 busybox
+                //（真实路径在 nativeLibraryDir，有 exec 权限），彻底绕开软链解析与 noexec。
+                val cmd = mutableListOf(
+                    proot.absolutePath, "-0",
                     "-r", rootfs.absolutePath,
                     "--link2symlink",
-                ) + busyboxBind + listOf(
                     "-b", "/dev",
                     "-b", "/proc",
                     "-b", "/sys",
                     "-b", "/dev/pts",
-                    "-w", "/",
-                    "/bin/sh"
                 )
-                val pb = ProcessBuilder(cmd).redirectErrorStream(true)
+                val shell = if (busyboxSo.exists()) {
+                    cmd += listOf("-b", "$nativeLibDir:/.cybin")
+                    "/.cybin/libcybusybox.so"
+                } else {
+                    "/bin/sh"
+                }
+                // busybox 靠 argv[0] basename 选 applet，basename 是 libcybusybox.so
+                // 不是 applet → 必须显式给 "sh" 子命令（等价于 busybox sh）。
+                cmd += listOf("-w", "/", shell, "sh")
+                val cmdFinal = cmd.toList()
+                val pb = ProcessBuilder(cmdFinal).redirectErrorStream(true)
                 // proot 每次调用必备的环境（照 ZorvAI MoyuRuntime.prootBaseEnv 的成熟做法）
                 if (loader.exists()) pb.environment()["PROOT_LOADER"] = loader.absolutePath
                 pb.environment()["LD_LIBRARY_PATH"] = rootfs.absolutePath
@@ -304,5 +305,5 @@ object ProotBridge {
 
     // 升版强制重装：v1 的解包丢了 tar mode（busybox 0644 → /bin/sh not executable），
     // 旧设备上 marker 仍是 cy-userspace-1，不升版就会继续用坏的旧 rootfs。
-    private const val ROOTFS_VERSION = "cy-userspace-2"
+    private const val ROOTFS_VERSION = "cy-userspace-3"
 }
