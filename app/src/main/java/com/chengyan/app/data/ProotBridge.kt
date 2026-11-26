@@ -157,6 +157,14 @@ object ProotBridge {
                 }
                 marker.writeText(ROOTFS_VERSION)
             }
+            // 兜底：即使 marker 匹配（跳过解包），也必须保证 busybox 可执行。
+            // 旧版本解包出来的 rootfs 没有执行位，不修就会一直报 '/bin/sh' is not executable。
+            val busybox = File(rootfs, "bin/busybox")
+            if (busybox.exists() && !busybox.canExecute()) {
+                try { android.system.Os.chmod(busybox.path, 0b111101101) } catch (_: Throwable) {
+                    busybox.setExecutable(true)
+                }
+            }
             return true
         } catch (e: Throwable) {
             lastError = "资产准备失败：${e::class.simpleName} ${e.message}"
@@ -284,5 +292,7 @@ object ProotBridge {
 
     fun current(): State = _stateFlow.value
 
-    private const val ROOTFS_VERSION = "cy-userspace-1"
+    // 升版强制重装：v1 的解包丢了 tar mode（busybox 0644 → /bin/sh not executable），
+    // 旧设备上 marker 仍是 cy-userspace-1，不升版就会继续用坏的旧 rootfs。
+    private const val ROOTFS_VERSION = "cy-userspace-2"
 }
