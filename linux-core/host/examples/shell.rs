@@ -32,4 +32,13 @@ fn main() {
     let txt = String::from_utf8_lossy(&out.lock().unwrap()).into_owned();
     print!("{txt}");
     eprintln!("[ch-exit {code}]");
+    // 未实现 syscall 报表：VM 矩阵里这一行就是「内核还缺什么」的直接证据，
+    // 在真机上同样的数字由 `linux info` / 终端「自检」给出。
+    let ui = ch_kernel::syscall::unimplemented_report();
+    if !ui.is_empty() {
+        eprintln!(
+            "[ch-unimpl total={} {ui}]",
+            ch_kernel::syscall::unimplemented_total()
+        );
+    }
 }

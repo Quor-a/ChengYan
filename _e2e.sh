@@ -100,6 +100,13 @@ t "cp / mv / rm"         "echo z > /tmp/m1; cp /tmp/m1 /tmp/m2; mv /tmp/m2 /tmp/
 t "wc -l 多文件"          "wc -l /etc/passwd /etc/group"
 
 echo
+echo "############ 无界生产者（SIGPIPE 上限） ############"
+t "yes|head 不挂死"      "yes ch | head -3"
+t "无界流按字节截断"     "yes abc | head -c 16 | wc -c"
+t "yes|wc 也被截断"      "yes ch | head -5 | wc -l"
+t "重复输出不炸内存"      "yes abc | tail -1 | head -1"
+
+echo
 echo "############ 越狱防护 ############"
 t "../.. 不出 jail"      "cd /; ls ../../ 2>&1 | head -3"
 t "读宿主 /etc/shadow"    "cat ../../../etc/shadow 2>&1 | head -2"

@@ -432,14 +432,20 @@ pub extern "system" fn Java_com_chengyan_app_data_LinuxNative_info(
 ) -> jstring {
     let text = guard("info", "info: panic".to_string(), move || {
         let live = machines().iter().filter(|s| s.is_some()).count();
+        // 未实现 syscall：真机上「命令没反应/莫名失败」的第一嫌疑。
+        // 空串 = 这条会话里 guest 要的 syscall 全都实现了。
+        let unimpl = ch_kernel::syscall::unimplemented_report();
         format!(
-            "abi={} window={} tier1={} fallback={} machines={} v={}",
+            "abi={} window={} tier1={} fallback={} machines={} v={}
+unimpl_total={} unimpl={}",
             std::env::consts::ARCH,
             if ch_kernel::window_reserved() { "ok" } else { "failed" },
             ch_host::native::tier1_hits(),
             ch_host::native::tier1_fallbacks(),
             live,
             env!("CARGO_PKG_VERSION"),
+            ch_kernel::syscall::unimplemented_total(),
+            if unimpl.is_empty() { "none" } else { &unimpl },
         )
     });
     mk_string(env, &text)

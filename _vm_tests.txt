@@ -39,5 +39,9 @@ tail 取尾	printf '1\n2\n3\n4\n5\n' | tail -2
 find	find /etc -maxdepth 1 -name 'os*'
 cp / mv / rm	echo z > /tmp/m1; cp /tmp/m1 /tmp/m2; mv /tmp/m2 /tmp/m3; cat /tmp/m3; rm -f /tmp/m3; ls /tmp/m3 2>&1 | head -1
 wc -l 多文件	wc -l /etc/passwd /etc/group
+yes|head 不挂死	yes ch | head -3
+无界流按字节截断	yes abc | head -c 16 | wc -c
+yes|wc 也被截断	yes ch | head -5 | wc -l
+重复输出不炸内存	yes abc | tail -1 | head -1
 ../.. 不出 jail	cd /; ls ../../ 2>&1 | head -3
 读宿主 /etc/shadow	cat ../../../etc/shadow 2>&1 | head -2

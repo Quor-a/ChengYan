@@ -93,11 +93,55 @@ impl std::io::Write for SharedWriter {
     fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
 }
 
+/// 管道段/重定向用的**有界**捕获写端。
+///
+/// 与 `SharedWriter` 的区别：SharedWriter 是终端历史（保留最新 384KB），
+/// 而管道下游要的是流的**开头**（`cat big | head -3`）。所以这里保留全部开头字节，
+/// 到 `CAP_HARD` 才放弃，并把 `over` 置位让 syscall 层按 SIGPIPE 结束上游。
+///
+/// 没有这一步时 `yes | head -2` / `cat /dev/zero | head -c 10` 这类命令会在
+/// guest 里无限 write：栈上缓冲一路涨到 Android 的 oom-killer 把整个 App 干掉，
+/// 或者一路跑到引擎的 step budget（真机上是几分钟的"终端没反应"）。
+pub struct CappedWriter {
+    buf: SharedOut,
+    over: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// 管道缓冲硬上限。低于它一律逐字节保留（`cat 20MB | wc -l` 结果仍正确）。
+const CAP_HARD: usize = 24 * 1024 * 1024;
+
+impl std::io::Write for CappedWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let mut g = self.buf.lock().unwrap_or_else(|e| e.into_inner());
+        let room = CAP_HARD.saturating_sub(g.len());
+        if room == 0 {
+            drop(g);
+            self.over.store(true, std::sync::atomic::Ordering::Relaxed);
+            return Ok(buf.len());
+        }
+        if buf.len() <= room {
+            g.extend_from_slice(buf);
+            Ok(buf.len())
+        } else {
+            // 只截数据，**不往数据流里写提示**：这条流可能正接给 `tail -1` / `wc -l`，
+            // 多一行提示就会让它们的结果错掉。提示由 shell 在管道结束后写到 stderr。
+            g.extend_from_slice(&buf[..room]);
+            drop(g);
+            self.over.store(true, std::sync::atomic::Ordering::Relaxed);
+            Ok(buf.len())
+        }
+    }
+    fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+}
+
 /// 一次执行的产物。
 pub struct ExecResult {
     pub code: i32,
     pub out: Vec<u8>,
     pub err: Vec<u8>,
+    /// 输出触到 `CAP_HARD`（上游已按 SIGPIPE 结束）。shell 据此给用户一句提示，
+    /// 但**不塞进数据流**——否则 `tail`/`wc` 的结果会被提示行带偏。
+    pub truncated: bool,
 }
 
 /// 会话：绑一份 busybox（多调用二进制）与 jailed rootfs。
@@ -193,6 +237,7 @@ impl Session {
         cwd: &str,
         out: Box<dyn std::io::Write + Send>,
         err: Box<dyn std::io::Write + Send>,
+        cap: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     ) -> Result<i32, String> {
         self.ensure_proc();
         let mut proc = Process::new(&self.busybox_bytes)?;
@@ -200,6 +245,7 @@ impl Session {
         proc.cwd = cwd.to_string();
         proc.out = out;
         proc.err = err;
+        proc.out_cap = cap;
         // stdin 注入：管道/here 数据由宿主预置，guest read(0) 从游标读
         proc.stdin = std::io::Cursor::new(stdin.to_vec());
 
@@ -373,6 +419,7 @@ impl Session {
             &cwd,
             Box::new(SharedWriter(out_shared.clone())),
             Box::new(SharedWriter(out_shared.clone())),
+            None,
         )
     }
 
@@ -380,18 +427,21 @@ impl Session {
     pub fn run_capture(&self, argv: &[String], stdin: &[u8], cwd: &str) -> ExecResult {
         let o: SharedOut = Arc::new(Mutex::new(Vec::new()));
         let e: SharedOut = Arc::new(Mutex::new(Vec::new()));
+        let over = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let code = self.run_io(
             argv,
             stdin,
             cwd,
-            Box::new(SharedWriter(o.clone())),
-            Box::new(SharedWriter(e.clone())),
+            Box::new(CappedWriter { buf: o.clone(), over: over.clone() }),
+            Box::new(CappedWriter { buf: e.clone(), over: over.clone() }),
+            Some(over.clone()),
         );
         let out = o.lock().unwrap().clone();
         let err = e.lock().unwrap().clone();
+        let truncated = over.load(std::sync::atomic::Ordering::Relaxed);
         match code {
-            Ok(c) => ExecResult { code: c, out, err },
-            Err(msg) => ExecResult { code: 139, out, err: [err, msg.into_bytes()].concat() },
+            Ok(c) => ExecResult { code: c, out, err, truncated },
+            Err(msg) => ExecResult { code: 139, out, err: [err, msg.into_bytes()].concat(), truncated },
         }
     }
 
