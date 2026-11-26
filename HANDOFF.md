@@ -1,80 +1,67 @@
-# ChengYan 交接文档（2026-11-27 深夜更新）
+# ChengYan 终端 — 新环境接手文档
 
-> 给另一个开发环境的完整接手说明。读完就能继续，不用翻聊天记录。
+> 最后更新：2026-11-27。目标：另一个环境 clone 后能直接构建、理解架构、继续开发。
+> 工程根：`D:/Calw OS-project/ChengYan`（GitHub `Quor-a/ChengYan`，main 分支）
 
-## 1. 当前架构（用户拍板，勿再改方向）
+## 1. 架构（照 ZorvAI terminal-core 完整搬入，去品牌化）
+
+**终端 = Alpine Linux 3.24 rootfs + proot + 真 PTY**。架构照 ZorvAI terminal-core 完整搬入（去品牌化），发行版按用户要求换成 Alpine Linux 3.24：
 
 ```
-终端 UI（app/.../ui/screens/TerminalScreen.kt）—— 保留，勿重写
-        ↓ LinuxBridge（兼容层，API 不变）
-TtyBridge（app/.../data/TtyBridge.kt）
-        ↓ Pty.start([nativeLibDir/libcybusybox.so, "sh"], env, rootfs)
-JNI pty.c（app/src/main/cpp/pty.c，forkpty → execvpe）
-        ↓
-自编译全静态 aarch64 busybox 用户空间（从源码构建，非复制发行版）
+TerminalScreen (Compose UI，保留原样)
+  → LinuxBridge (兼容层，对外 API 不变)
+  → TtyBridge (完整运行时，本轮重写)
+      ├─ linkNativeLibs()      nativeLibDir 交叉编译工具链 → usr/bin 建链（静态 ET_EXEC，软链失败退实体拷贝）
+      ├─ createBusyboxSymlinks() usr/bin 铺 busybox applet
+      ├─ extractAssets()       Alpine 3.24 aarch64 tarball (3.9MB) 按 lastUpdateTime+ASSET_VERSION 拷入
+      ├─ writeCommonScript()   common.sh (install_alpine 解压)
+      ├─ prepareGuestRootfs()  宿主侧 cy-bash 跑 install_alpine（不开 proot）
+      └─ buildProotLaunch()    proot -r rootfs ... /bin/sh -c '...exec /bin/sh -l'（Alpine 默认 ash）
+  → Pty.start(proot...)        JNI forkpty → execvpe，proot 是 PTY **直接**子进程
 ```
 
-**三条铁律（用户反复强调）：**
-1. 用户空间是**开发出来**的（源码交叉编译），不是复制 Alpine/Ubuntu。
-2. **不用自研内核**（原 `linux-core/` 已删，勿恢复）。
-3. **终端 UI 保留当前的**。
+### 三条铁律（ZorvAI 复盘，违反就黑屏）
+1. **proot 必须是 PTY 直接子进程**，不能经宿主 bash 中转 —— 否则 loader 注入 PEEKDATA 失败 → 黑屏。
+2. **静态 ET_EXEC 不能做 PIE 门控**：`libbash.so`/`libbusybox.so`/`libloader.so` 都是 e_type=2 无 PT_INTERP，内核 binfmt_elf 直接映射执行；`isPieElf` 误判跳过建链 → exec 不存在的文件 → 终端必死。
+3. **软链失败必须退实体拷贝**：云手机 FUSE FS 不支持 symlink；只 Log+return 会导致 usr/bin/cy-bash 不存在 → 黑屏。
 
-## 2. 为什么放弃 proot（2026-11-27 深夜重大架构修正）
+## 2. 资产清单（全部已入库）
 
-看完整 ZorvAI 终端架构（`.wb-artifacts-staging/source/terminal-core/`）后确认：
+- `app/src/main/assets/alpine-minirootfs-3.24.0-aarch64.tar.gz` — 4,043,766 B，515 文件，sha256 `4b8cd66a6688b2a87276c39843ed89c3a06d9534fc6a5823c586aff2696c1f2a`，VERSION_ID=3.24.0，含 busybox/sh/apk/musl 动态链接器
+- `app/src/main/jniLibs/arm64-v8a/lib{bash,busybox,proot,loader,libtalloc.so.2,sudo,pty}.so` — 交叉编译工具链（全 aarch64）
+- `app/src/main/assets/linux_env/libproot-loader.so` — proot loader
+- `app/src/main/cpp/pty.c` + `CMakeLists.txt` — JNI forkpty（去品牌化）
 
-| | ZorvAI | ChengYan |
-|---|---|---|
-| 用户空间 | Ubuntu 完整发行版（/bin/bash + glibc 动态程序） | **自编译全静态 busybox** |
-| 为什么用 proot | 动态程序需要 chroot + loader + bind | **根本不需要** |
-| 承载 | `Pty.start(libproot.so --rootfs=... /bin/bash -il)` | `Pty.start(libcybusybox.so sh)` |
-
-之前照搬 proot 踩了 5 个坑（talloc 缺失、noexec、loader、软链、PEEKDATA），
-根源是**我们的用户空间是全静态的，不需要 proot**。现在直接 forkpty 挂静态 busybox，
-整个 proot 层（libproot.so / libtalloc / loader / PROOT_LOADER / PROOT_TMP_DIR）全部不需要。
-
-**ZorvAI 架构的关键learnings（已用上）：**
-- `Pty.kt` + `pty.c` 的 forkpty（不是 ProcessBuilder 管道）——真 tty 才有 ^C/isatty
-- proot 必须是 PTY 直接子进程（不能直接 ProcessBuilder），经 bash 中转 PEEKDATA 会失败
-- 但静态 busybox 直连 PTY 更干净，连 proot 都省了
-
-## 3. 用户空间构建链（可完整复现）
+## 3. 构建
 
 ```bash
-# 依赖：zig 0.13（自带 aarch64-linux-musl libc）、make、python3、curl
-# Alpine: apk add zig make python3 aarch64-none-elf-binutils
-sh userspace-build/build-zig.sh     # 自动下载 busybox 1.37.0 源码，编译+组装+打包
-cp userspace-build/rootfs.tar.gz app/src/main/assets/cy-rootfs.tar.gz
-cp userspace-build/busybox-aarch64 app/src/main/assets/busybox-aarch64
-cp userspace-build/busybox-aarch64 app/src/main/jniLibs/arm64-v8a/libcybusybox.so
-```
-
-`build-zig.sh` 解决的 kbuild 兼容问题（勿删）：`-Wp,-MD` 改写、关 SHA-NI、
-过滤 zig ld 不支持的链接参数、strip 包装、/tmp 无空格路径编译。
-
-## 4. 构建与门禁
-
-```bash
+# 需 Android SDK + NDK 27 + JDK 17（本机 gradle 8.13，阿里云镜像优先）
 ./gradlew :app:assembleRelease --no-daemon
-python scripts/gate-userspace.py       # 必须 PASS 才能交付
+python scripts/gate-userspace.py    # 门禁：验 APK 内全套 so 是 aarch64 ELF + Alpine 3.24 rootfs 3-12MB + 旧内核已删；必须 PASS
 ```
 
-门禁检查：libpty.so + libcybusybox.so 是 aarch64 ELF、rootfs busybox 有执行位、
-bin/sh 软链、旧 libchlinux.so 已移除。用户明确要求，勿删。
+门禁脚本 `scripts/gate-userspace.py` 是硬门槛，任何资产缺失/架构不符即非零退出，不出包。
 
-版本：versionCode 12 / versionName 1.9.12（**绝不擅自改版本号**）。
+## 4. 当前状态 / 待验证
 
-## 5. 当前状态
+- APK：`ChengYan-v1.9.12-Alpine3.24完整架构-20261127.apk`（35MB，含 3.9MB Alpine rootfs），已放桌面
+- 版本 **1.9.12 / versionCode 12**（未动，按用户铁律）
+- **待真机验证**：这套完整架构尚未真机跑过。首启动会解压 3.9MB Alpine rootfs（秒级），解压完进 Alpine ash 登录 shell。
+- 之前失败的根因已消除：不再用 Ubuntu（用户要求 Alpine 3.24），不再用 830KB 自编译 busybox 拼凑，不再用 ProcessBuilder 管道，proot 直挂真 PTY。
 
-- 最新本地 commit `?`（真 PTY + 静态 busybox）；桌面 APK `ChengYan-v1.9.12-真PTY静态busybox-20261127.apk`
-- **真机尚未验证**：构建 + 门禁 PASS，但还没真机测。
-- 若有问题，先看 `diag()` 输出和 PTY 是否 alive；可能的点：pty.c 的 forkpty 权限、
-  busybox sh 的 argv[0]、rootfs 挂载点。
-- 之前 push 到 GitHub 的版本还是 proot 架构（HEAD `d10b0f2`），本地新架构尚未 push。
+## 5. 已知坑与修复历史（别重犯）
 
-## 6. 其它
+| 现象 | 根因 | 修复 |
+|---|---|---|
+| `libtalloc.so.2 not found` | AGP 排除带版本号结尾的 so | jniLibs 用 `liblibtalloc.so.2.so`，链成 `usr/bin/libtalloc.so.2` + LD_LIBRARY_PATH |
+| `'/bin/sh' is not executable` | 解包丢 tar mode | 按 tar header 恢复 chmod |
+| `execve Permission denied` | filesDir noexec | 可执行文件放 nativeLibraryDir（系统给 exec 权限） |
+| `CANNOT LINK EXECUTABLE ... unexpected e_type:2` | 把静态 ET_EXEC 当 PIE / dlopen | 不做 PIE 门控，不做 dlopen，直接 exec |
+| 终端黑屏但环境就绪 | proot 经 bash 中转，PEEKDATA 失败 | proot 直挂 PTY |
+| 修了没变化 | rootfs marker/asset stamp 没升版 | 改资产内容必须升 ASSET_VERSION / marker |
 
-- 探针功能独立：`libfdosprobe.so` + `libc++_shared.so` + `FdosProbe.kt`（勿删）
-- ZorvAI（QuroAI）是另一个项目，**不要动**；它的 `.wb-artifacts-staging/source/terminal-core/`
-  有完整终端架构参考（Pty.kt / pty.c / TerminalEnvironment.kt / ProotLaunch.kt）。
-- **未经用户测试确认，不要推送/发布**（用户铁律）。
+## 6. 下一步
+
+1. 真机装 APK，观察首启动解压进度与最终是否进 Alpine ash（提示符）。
+2. 若失败：点终端「自检」按钮看 `LinuxBridge.diag()` 输出（rootfs/tarball/cyBash/proot/loader/ptyAlive/lastError）。
+3. 若进 shell：验证 `ls`/`apk`/`cat`、`^C` 中断、窗口大小变化。需要更多工具时 `apk add bash python3`。

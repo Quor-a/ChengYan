@@ -2,20 +2,24 @@ package com.chengyan.app.data
 
 import android.content.Context
 import java.io.File
+import java.nio.file.Files
+import java.nio.file.Paths
 
 /**
- * ChengYan 新运行时：**静态 busybox + 真 PTY**，不用 proot。
+ * ChengYan 终端运行时 —— **照 ZorvAI terminal-core 完整架构搬入，发行版换 Alpine Linux 3.24**。
  *
- * 为什么不用 proot（ZorvAI 用的那套）：
- *  - ZorvAI 跑的是 Ubuntu 动态程序（/bin/bash + glibc），需要 proot 做 chroot；
- *  - 我们的是**自己交叉编译的全静态 busybox 用户空间**，没有动态链接依赖，
- *    直接用 forkpty 把 busybox sh 挂到真终端即可 —— 绕开 proot 的全部坑
- *    （loader、talloc、PTRACE、noexec bind）。
+ * 完整链路（与 ZorvAI `TerminalEnvironment` 一致，仅去品牌化）：
+ *   1) linkNativeLibs(): nativeLibraryDir 的交叉编译工具链（bash/busybox/proot/loader/talloc）
+ *      无条件建链到 usr/bin（静态 ET_EXEC，软链失败退实体拷贝 —— 云手机 FS 兼容）
+ *   2) createBusyboxSymlinks(): usr/bin 下铺 busybox applet 链
+ *   3) extractAssets(): Alpine Linux 3.24 aarch64 rootfs tarball 按 lastUpdateTime+ASSET_VERSION 拷入
+ *   4) writeCommonScript(): common.sh（install_alpine）
+ *   5) prepareGuestRootfs(): 宿主侧用 cy-bash 跑 install_alpine 解压（不开 proot，无 PEEKDATA 问题）
+ *   6) buildProotLaunch(): proot -r rootfs ... /bin/sh -l ...（proot 作为 PTY 直接子进程）
+ *   7) Pty.start(proot...) → fallback 600ms 验活 → 回落系统 shell 打屏
  *
- * 架构（照 ZorvAI 的「Pty 直接挂子进程」范式）：
- *   Pty.start([nativeLibDir/libcybusybox.so, "sh"], env, rootfs)
- *     → JNI forkpty → execvpe → busybox sh（controlling tty 已建立）
- *     → ^C 走内核线路规程发 SIGINT，isatty=1，^D 退出
+ * 关键（ZorvAI 复盘铁律）：proot 必须是 PTY 的**直接**子进程，不能经宿主 bash 中转，
+ * 否则 loader 注入 PEEKDATA 失败 → 黑屏。静态 ET_EXEC 不能被 isPieElf 门控误判跳过建链。
  */
 object TtyBridge {
 
@@ -32,129 +36,257 @@ object TtyBridge {
 
     private var ctx: Context? = null
     private val lock = Any()
+    private val readLock = Any()
     private var pty: Pty? = null
     private val outBuf = StringBuilder()
-    private val readLock = Any()
+    private var initialized = false
+
+    private val filesDir: File get() = ctx!!.filesDir
+    private val usrDir: File get() = File(filesDir, "usr")
+    private val binDir: File get() = File(usrDir, "bin")
+    private val nativeLibDir: String get() = ctx!!.applicationInfo.nativeLibraryDir
+    private val sharedHostDir: String get() = ctx!!.getExternalFilesDir(null)?.absolutePath
+        ?: File(filesDir, "shared").apply { mkdirs() }.absolutePath
 
     fun init(context: Context) { ctx = context.applicationContext }
 
-    private fun baseDir(): File = File(ctx!!.filesDir, "cy-linux")
+    // ---------------- 初始化（照 TerminalEnvironment.initializeEnvironment）----------------
 
-    /** 解包自编译 rootfs（幂等）。busybox 从 nativeLibraryDir 执行（noexec 绕过）。 */
-    private fun ensureAssets(): Boolean {
-        val base = baseDir()
-        val rootfs = File(base, "rootfs")
-        val marker = File(rootfs, ".cy-version")
-        if (marker.exists() && marker.readText().trim() == VERSION) return true
-        try {
-            rootfs.deleteRecursively()
-            for (d in listOf("bin", "sbin", "lib", "etc", "usr/bin", "usr/sbin", "proc", "sys", "dev", "tmp", "root", "home")) {
-                File(rootfs, d).mkdirs()
+    private fun ensureInit(): Boolean {
+        if (initialized) return true
+        synchronized(lock) {
+            if (initialized) return true
+            try {
+                createDirectories()
+                linkNativeLibs()
+                createBusyboxSymlinks()
+                extractAssets()
+                writeCommonScript()
+                initialized = true
+                return true
+            } catch (e: Throwable) {
+                lastError = "环境初始化失败：${e::class.simpleName} ${e.message}"
+                return false
             }
-            val (stream, gz) = listOf("cy-rootfs.tar.gz", "cy-rootfs.tar")
-                .mapNotNull { name ->
-                    try {
-                        val s = java.io.PushbackInputStream(ctx!!.assets.open(name), 2)
-                        val magic = ByteArray(2)
-                        val n = s.read(magic)
-                        val isGz = n == 2 && magic[0] == 0x1f.toByte() && magic[1] == 0x8b.toByte()
-                        if (!isGz) s.unread(magic, 0, n)
-                        s to isGz
-                    } catch (e: Exception) { null }
-                }.firstOrNull() ?: run {
-                    lastError = "找不到自编译 rootfs 资产"
-                    return false
-                }
-            val raw = if (gz) java.util.zip.GZIPInputStream(stream) else stream
-            raw.use { tar ->
-                java.io.DataInputStream(tar).use { t ->
-                    val hdr = ByteArray(512)
-                    while (true) {
-                        var off = 0
-                        while (off < 512) {
-                            val n = t.read(hdr, off, 512 - off)
-                            if (n < 0) break
-                            off += n
-                        }
-                        if (off < 512) break
-                        if (hdr.all { it == 0.toByte() }) break
-                        var size = 0L
-                        for (i in 124 until 136) {
-                            val c = hdr[i].toInt()
-                            if (c == 0 || c == ' '.code) break
-                            size = size * 8 + (c - '0'.code)
-                        }
-                        val name = String(hdr, 0, 100).trimEnd('\u0000').removePrefix("./")
-                        if (name.isEmpty()) { t.skipNBytes(size); continue }
-                        when (hdr[156].toInt()) {
-                            '5'.code -> File(rootfs, name).mkdirs()
-                            '2'.code -> {
-                                val link = String(hdr, 157, 100).trimEnd('\u0000')
-                                val dst = File(rootfs, name)
-                                dst.parentFile?.mkdirs()
-                                try { android.system.Os.symlink(link, dst.path) } catch (_: Throwable) {}
-                            }
-                            else -> {
-                                val dst = File(rootfs, name)
-                                dst.parentFile?.mkdirs()
-                                dst.outputStream().use { o ->
-                                    var left = size
-                                    val buf = ByteArray(8192)
-                                    while (left > 0) {
-                                        val n = t.read(buf, 0, minOf(buf.size.toLong(), left).toInt())
-                                        if (n <= 0) break
-                                        o.write(buf, 0, n)
-                                        left -= n
-                                    }
-                                }
-                                var m = 0
-                                for (i in 100 until 108) {
-                                    val c = hdr[i].toInt()
-                                    if (c == 0 || c == ' '.code) break
-                                    if (c in '0'.code..'7'.code) m = m * 8 + (c - '0'.code)
-                                }
-                                if (m != 0) try { android.system.Os.chmod(dst.path, m) } catch (_: Throwable) {}
-                            }
-                        }
-                        val pad = (512 - (size % 512)) % 512
-                        if (pad > 0) t.skipNBytes(pad)
-                    }
-                }
-            }
-            marker.writeText(VERSION)
-            return true
-        } catch (e: Throwable) {
-            lastError = "资产解包失败：${e::class.simpleName} ${e.message}"
-            return false
         }
     }
+
+    private fun createDirectories() {
+        usrDir.mkdirs()
+        binDir.mkdirs()
+        File(filesDir, "tmp").mkdirs()
+        File(filesDir, "proot_home").mkdirs()
+    }
+
+    /** 无条件建链：静态 ET_EXEC 由内核 binfmt_elf 直接映射，不经动态链接器。 */
+    private fun linkNativeLibs() {
+        val nl = File(nativeLibDir)
+        if (!nl.isDirectory) { lastError = "nativeLibraryDir 不存在：$nativeLibDir"; return }
+
+        fun linkOne(libName: String, linkName: String) {
+            val src = File(nativeLibDir, libName)
+            val dst = File(binDir, linkName)
+            if (!src.exists()) return
+            val ok = runCatching {
+                Files.deleteIfExists(dst.toPath())
+                src.setExecutable(true, false)
+                Files.createSymbolicLink(dst.toPath(), src.toPath())
+                dst.exists() && dst.canExecute()
+            }.getOrDefault(false)
+            if (!ok) runCatching {
+                Files.deleteIfExists(dst.toPath())
+                src.copyTo(dst, overwrite = true)
+                dst.setExecutable(true, false)
+            }
+        }
+
+        linkOne("libbusybox.so", "busybox")
+        // 与 ZorvAI 分名：cy-bash 是终端自己的 bash，避免与其它子系统抢路径。
+        linkOne("libbash.so", "cy-bash")
+        linkOne("libbash.so", "bash")
+        linkOne("libproot.so", "proot")
+        linkOne("libloader.so", "loader")
+        linkOne("liblibtalloc.so.2.so", "libtalloc.so.2")
+        linkOne("libsudo.so", "sudo")
+    }
+
+    private fun createBusyboxSymlinks() {
+        val links = listOf(
+            "awk", "ash", "basename", "bzip2", "curl", "cp", "chmod", "cut", "cat", "du", "dd",
+            "find", "grep", "gzip", "hexdump", "head", "id", "lscpu", "mkdir", "realpath", "rm",
+            "sed", "stat", "sh", "tr", "tar", "uname", "xargs", "xz", "xxd"
+        )
+        val busybox = File(binDir, "busybox")
+        for (name in links) {
+            val dst = File(binDir, name)
+            try {
+                Files.deleteIfExists(dst.toPath())
+                val target = if (busybox.parentFile == dst.parentFile) Paths.get(busybox.name) else busybox.toPath()
+                Files.createSymbolicLink(dst.toPath(), target)
+            } catch (_: Throwable) {}
+        }
+    }
+
+    /** Alpine tarball 按 lastUpdateTime + ASSET_VERSION 拷入（半截包原子替换）。 */
+    private fun extractAssets() {
+        val assetName = ALPINE_FILENAME
+        val dest = File(filesDir, assetName)
+        val stamp = File(filesDir, ".assets.stamp")
+        val prev = runCatching { stamp.readText() }.getOrDefault("")
+        val installTime = runCatching {
+            ctx!!.packageManager.getPackageInfo(ctx!!.packageName, 0).lastUpdateTime
+        }.getOrDefault(0L)
+        val av = Regex("^av=(\\d+)$", RegexOption.MULTILINE).find(prev)?.groupValues?.get(1)?.toIntOrNull() ?: -1
+        val needCopy = !prev.contains("v=$installTime") || av != ASSET_VERSION || !dest.exists() || dest.length() < 1_000_000L
+        if (needCopy) {
+            val tmp = File(filesDir, "$assetName.tmp")
+            try {
+                // AGP 把 assets/*.tar.gz 收进 APK 时去掉 .gz 后缀（rootfs.tar.gz → rootfs.tar），
+                // 内容仍是 gzip 流。两个名字都试，避免真机 assets.open 抛异常。
+                val names = listOf(assetName, assetName.removeSuffix(".gz"))
+                val stream = names.firstNotNullOfOrNull { n ->
+                    try { ctx!!.assets.open(n) } catch (_: Throwable) { null }
+                } ?: throw IllegalStateException("APK 内找不到 Alpine rootfs 资产（试过 $names）")
+                stream.use { input -> tmp.outputStream().use { input.copyTo(it) } }
+                if (dest.exists()) dest.delete()
+                if (!tmp.renameTo(dest)) { tmp.copyTo(dest, overwrite = true); tmp.delete() }
+            } catch (e: Throwable) {
+                // 瘦身包兜底：资产缺失时若设备已有解压好的 rootfs，仍可继续。
+                tmp.delete()
+                if (!dest.exists()) throw e
+            }
+        }
+        runCatching { stamp.writeText("v=$installTime\nav=$ASSET_VERSION\n$assetName=${dest.length()}\n") }
+    }
+
+    /** common.sh —— 宿主侧 install_alpine 解压用（纯文件操作，不开 proot）。 */
+    private fun writeCommonScript() {
+        val tmpDir = File(filesDir, "tmp").absolutePath
+        val b = binDir.absolutePath
+        val guestPath = File(usrDir, "var/lib/proot-distro/installed-rootfs/alpine").absolutePath
+        val script = """
+export TMPDIR=$tmpDir
+export BIN=$b
+export GUEST_PATH=$guestPath
+export GUEST=$ALPINE_FILENAME
+install_alpine(){
+  mkdir -p ${'$'}GUEST_PATH 2>/dev/null
+  if [ -z "${'$'}(ls -A ${'$'}GUEST_PATH)" ]; then
+    echo "extracting Alpine Linux 3.24 rootfs..."
+    ${'$'}BIN/busybox tar xf ${'$'}HOME/${'$'}GUEST -C ${'$'}GUEST_PATH/ >/dev/null 2>&1
+    rm -f ${'$'}HOME/${'$'}GUEST
+  fi
+  echo 'nameserver 8.8.8.8' > ${'$'}GUEST_PATH/etc/resolv.conf 2>/dev/null
+  echo PREPARE_DONE
+}
+""".trimIndent()
+        File(filesDir, "common.sh").writeText(script)
+    }
+
+    /** 宿主侧用 cy-bash 跑 install_alpine（不开 proot，无 PEEKDATA 问题）。 */
+    private fun prepareGuestRootfs(): Boolean {
+        val bash = File(binDir, "cy-bash")
+        if (!bash.exists() || !bash.canExecute()) { lastError = "缺 usr/bin/cy-bash（工具链未链接）"; return false }
+        return try {
+            val pb = ProcessBuilder(bash.absolutePath, "-c", "source \"\$HOME/common.sh\" && install_alpine")
+            pb.directory(filesDir)
+            pb.environment().putAll(baseEnv())
+            pb.redirectErrorStream(true)
+            val p = pb.start()
+            val out = p.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+            val ok = p.waitFor(600_000, java.util.concurrent.TimeUnit.MILLISECONDS) && p.exitValue() == 0
+            if (!ok) lastError = "rootfs 解压失败：$out"
+            ok
+        } catch (e: Throwable) {
+            lastError = "rootfs 解压异常：${e::class.simpleName} ${e.message}"
+            false
+        }
+    }
+
+    private fun baseEnv(): MutableMap<String, String> = mutableMapOf(
+        "PATH" to "/system/bin:/system/xbin:${binDir.absolutePath}:${System.getenv("PATH") ?: ""}",
+        "HOME" to filesDir.absolutePath,
+        "PREFIX" to usrDir.absolutePath,
+        "LD_LIBRARY_PATH" to "$nativeLibDir:${binDir.absolutePath}:/lib:/usr/lib:/usr/local/lib",
+        "PROOT_LOADER" to File(binDir, "loader").absolutePath,
+        "TMPDIR" to File(filesDir, "tmp").absolutePath,
+        "PROOT_TMP_DIR" to File(filesDir, "tmp").absolutePath,
+    )
+
+    /** proot 作为 PTY 直接子进程 —— 照 ZorvAI buildProotLaunch。 */
+    private fun buildProotLaunch(): Array<String> {
+        val rootfs = File(usrDir, "var/lib/proot-distro/installed-rootfs/alpine")
+        val tmpDir = File(filesDir, "tmp").absolutePath
+        val sharedHome = File(filesDir, "proot_home").apply { mkdirs() }.absolutePath
+        val prootBin = File(nativeLibDir, "libproot.so").absolutePath
+
+        // guest bind 挂载点必须真实存在，否则 proot 静默跳过 → -w /root 落空 → getcwd 失败
+        for (p in listOf("root", "tmp", "mnt", "mnt/shared", "root/shared", "dev", "dev/pts", "proc", "sys", "storage/emulated"))
+            File(rootfs, p).mkdirs()
+
+        val cmd = mutableListOf(
+            prootBin,
+            "--rootfs=${rootfs.absolutePath}",
+            "--link2symlink",
+            "--bind=/dev", "--bind=/dev/pts", "--bind=/dev/urandom:/dev/random",
+            "--bind=/proc", "--bind=/proc/net:/proc/net", "--bind=/sys",
+            "--bind=$tmpDir:/tmp", "--bind=$tmpDir:/dev/shm",
+            "--bind=$sharedHome:/mnt/shared", "--bind=$sharedHome:/root/shared",
+            "--bind=${filesDir.absolutePath}:/chengyan",
+            "-0", "-w", "/root",
+            "/bin/sh", "-c",
+            "echo LOGIN_SUCCESSFUL; echo TERMINAL_READY; exec /bin/sh -l"
+        )
+        return cmd.toTypedArray()
+    }
+
+    private fun prootEnv(): Map<String, String> = mapOf(
+        "HOME" to "/root",
+        "TERM" to "xterm-256color",
+        "LANG" to "C.UTF-8",
+        "PATH" to "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/.cargo/bin:/root/.local/bin",
+        "LD_LIBRARY_PATH" to "$nativeLibDir:${binDir.absolutePath}:/lib:/usr/lib:/usr/local/lib",
+        "TMPDIR" to "/tmp",
+        "PROOT_TMP_DIR" to File(filesDir, "tmp").absolutePath,
+        "PROOT_LOADER" to File(nativeLibDir, "libproot-loader.so").absolutePath
+            .let { if (File(it).exists()) it else File(binDir, "loader").absolutePath },
+        "SSL_CERT_FILE" to "/etc/ssl/certs/ca-certificates.crt",
+        "CURL_CA_BUNDLE" to "/etc/ssl/certs/ca-certificates.crt",
+    )
+
+    private fun fallback(reason: String): Array<String> {
+        val why = reason.replace("'", "").replace("\n", " ").take(160)
+        return arrayOf("/system/bin/sh", "-c",
+            "echo \"[ChengYan] 终端启动失败：$why\"; echo '[ChengYan] 回落系统 shell（功能受限）'; exec /system/bin/sh")
+    }
+
+    // ---------------- 对外 API（LinuxBridge 依赖）----------------
 
     fun ensure(): Long {
         synchronized(lock) {
             if (pty != null && pty!!.isAlive()) return 1L
             if (ctx == null) { lastError = "TtyBridge.init 未调用"; return -10L }
-            if (!ensureAssets()) return -10L
-            try {
-                val rootfs = File(baseDir(), "rootfs")
-                val busybox = File(ctx!!.applicationInfo.nativeLibraryDir, "libcybusybox.so")
-                if (!busybox.exists()) { lastError = "缺 nativeLibraryDir/libcybusybox.so"; return -10L }
-                // 静态 busybox 直接挂 PTY：execvpe 的真实路径在 nativeLibraryDir（有 exec 权限），
-                // chdir 到 rootfs；busybox 的 "sh" 子命令进入交互 shell。
-                val cmd = arrayOf(busybox.absolutePath, "sh")
-                val env = mapOf(
-                    "HOME" to "/root",
-                    "PATH" to "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-                    "TERM" to "xterm-256color",
-                    "LANG" to "C.UTF-8",
-                )
-                val p = Pty.start(cmd, env, rootfs)
-                pty = p
-                append("ChengYan userspace ready (self-compiled static busybox, real PTY)\n")
-                return 1L
-            } catch (e: Throwable) {
-                lastError = "PTY 启动失败：${e::class.simpleName} ${e.message}"
-                return -10L
+            if (!ensureInit()) return -10L
+            if (!prepareGuestRootfs()) return -10L
+            val env = prootEnv()
+            val cmd = buildProotLaunch()
+            val p = try {
+                Pty.start(cmd, env, filesDir)
+            } catch (t: Throwable) {
+                Pty.start(fallback(t.message ?: "forkpty 失败"), env, filesDir)
             }
+            // 600ms 验活：exec 失败/权限受限时立即回落，避免黑屏
+            Thread.sleep(600)
+            if (!p.isAlive()) {
+                val code = runCatching { p.process.exitValue() }.getOrDefault(-1)
+                append("proot 立即退出 exit=$code，回落系统 shell\n")
+                runCatching { p.destroy() }
+                pty = Pty.start(fallback("proot exit=$code"), env, filesDir)
+            } else {
+                pty = p
+            }
+            append("ChengYan terminal ready (Alpine 3.24 + proot + real PTY)\n")
+            return 1L
         }
     }
 
@@ -183,17 +315,13 @@ object TtyBridge {
                     }
                 }
             } catch (_: Throwable) {}
-            val st = State(pty?.isAlive() == true, null, outBuf.toString(), outBuf.length)
-            return st
+            return State(pty?.isAlive() == true, null, outBuf.toString(), outBuf.length)
         }
     }
 
-    /** ^C：往 PTY 主端写 0x03，真线路规程会转成 SIGINT 发给前台进程组。 */
+    /** ^C：往 PTY 主端写 0x03，线路规程转成 SIGINT 发前台进程组。 */
     fun interrupt() {
-        try {
-            pty?.stdin?.write(0x03)
-            pty?.stdin?.flush()
-        } catch (_: Throwable) {}
+        try { pty?.stdin?.write(0x03); pty?.stdin?.flush() } catch (_: Throwable) {}
     }
 
     private fun append(s: String) {
@@ -207,16 +335,22 @@ object TtyBridge {
             pty = null
             outBuf.setLength(0)
             lastError = ""
+            initialized = false
             return ensure() > 0
         }
     }
 
     fun diag(): String = buildString {
-        appendLine("runtime=static-busybox + real PTY (no proot)")
-        appendLine("rootfs=${File(baseDir(), "rootfs").absolutePath}")
+        appendLine("runtime=Alpine Linux 3.24 rootfs + proot + real PTY (ZorvAI architecture)")
+        appendLine("rootfs=${File(usrDir, "var/lib/proot-distro/installed-rootfs/alpine").absolutePath}")
+        appendLine("tarball=${File(filesDir, ALPINE_FILENAME).let { "${it.exists()} ${it.length()}" }}")
+        appendLine("cyBash=${File(binDir, "cy-bash").let { "${it.exists()} ${it.canExecute()}" }}")
+        appendLine("proot=${File(binDir, "proot").let { "${it.exists()} ${it.canExecute()}" }}")
+        appendLine("loader=${File(binDir, "loader").let { "${it.exists()} ${it.canExecute()}" }}")
         appendLine("ptyAlive=${pty?.isAlive() == true}")
         appendLine("lastError=$lastError")
     }
 
-    private const val VERSION = "cy-tty-1"
+    private const val ALPINE_FILENAME = "alpine-minirootfs-3.24.0-aarch64.tar.gz"
+    private const val ASSET_VERSION = 1
 }

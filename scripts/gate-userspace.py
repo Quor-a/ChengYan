@@ -1,72 +1,46 @@
 #!/usr/bin/env python3
-"""构建后门禁：验证 APK 内静态 busybox + 真 PTY 运行时完整。
+"""构建后门禁：验证 APK 内含 ZorvAI 完整终端运行时资产。失败即非零退出。"""
+import sys, zipfile, struct, os
 
-当前架构（不用 proot）：
-  lib/arm64-v8a/libpty.so        —— JNI forkpty（真 PTY）
-  lib/arm64-v8a/libcybusybox.so  —— 自编译静态 busybox（aarch64 ELF）
-  assets/cy-rootfs.tar           —— 自编译用户空间目录树
-
-用法：python scripts/gate-userspace.py [apk路径]
-"""
-import io
-import gzip
-import struct
-import sys
-import tarfile
-import zipfile
-
-APK = sys.argv[1] if len(sys.argv) > 1 else "app/build/outputs/apk/release/app-release.apk"
+APK = os.path.join(os.path.dirname(__file__), "..", "app", "build", "outputs", "apk", "release", "app-release.apk")
+APK = os.path.normpath(APK)
 fails = []
+def check(cond, what):
+    print(("  OK   " if cond else "  FAIL ") + what)
+    if not cond: fails.append(what)
 
-def check(cond, msg):
-    print(("  OK   " if cond else "  FAIL ") + msg)
-    if not cond:
-        fails.append(msg)
+def is_aarch64_elf(data):
+    return len(data) > 20 and data[:4] == b"\x7fELF" and data[4] == 2 and struct.unpack_from("<H", data, 18)[0] == 0xB7
 
-print("=== APK 用户空间门禁（静态 busybox + 真 PTY）===")
+print(f"门禁: {APK}")
+if not os.path.exists(APK):
+    print("FAIL APK 不存在"); sys.exit(1)
+
 with zipfile.ZipFile(APK) as z:
     names = set(z.namelist())
+    print("=== 1. 完整工具链 (nativeLibraryDir) ===")
+    for so in ["lib/arm64-v8a/libbash.so", "lib/arm64-v8a/libbusybox.so",
+               "lib/arm64-v8a/libproot.so", "lib/arm64-v8a/libloader.so",
+               "lib/arm64-v8a/liblibtalloc.so.2.so",
+               "lib/arm64-v8a/libpty.so"]:
+        check(so in names, so)
+        if so in names:
+            check(is_aarch64_elf(z.read(so)), so + " 是 aarch64 ELF")
 
-    print("[运行时 so]")
-    check("lib/arm64-v8a/libpty.so" in names, "libpty.so（JNI forkpty）")
-    check("lib/arm64-v8a/libcybusybox.so" in names, "libcybusybox.so（静态 busybox）")
-    for so in ("libpty.so", "libcybusybox.so"):
-        k = "lib/arm64-v8a/" + so
-        if k in names:
-            h = z.read(k)[:20]
-            check(len(h) >= 20 and struct.unpack_from("<H", h, 18)[0] == 0xB7,
-                  f"{so} 是 aarch64 ELF")
+    print("=== 2. Alpine 3.24 rootfs 资产 ===")
+    rootfs = next((n for n in names if "alpine-minirootfs-3.24.0" in n), None)
+    check(rootfs is not None, "Alpine 3.24 rootfs 资产存在")
+    if rootfs:
+        sz = z.getinfo(rootfs).file_size
+        check(3_000_000 < sz < 12_000_000, f"Alpine rootfs 大小 {sz} 在 3-12MB")
 
-    print("[用户空间资产]")
-    rootfs_name = next((n for n in names if n.startswith("assets/cy-rootfs.tar")), None)
-    check(rootfs_name is not None, "assets/cy-rootfs.tar(.gz) 存在")
+    print("=== 3. proot loader ===")
+    check("assets/linux_env/libproot-loader.so" in names, "libproot-loader.so")
 
-    if rootfs_name:
-        print("[rootfs 内容/权限]")
-        data = z.read(rootfs_name)
-        raw = io.BytesIO(gzip.decompress(data) if data[:2] == b"\x1f\x8b" else data)
-        with tarfile.open(fileobj=raw, mode="r:") as t:
-            members = {m.name.lstrip("./"): m for m in t.getmembers()}
-            bb = members.get("bin/busybox")
-            check(bb is not None, "bin/busybox 存在")
-            if bb:
-                check(bool(bb.mode & 0o111), "bin/busybox 有执行位 (mode=%o)" % bb.mode)
-                f = t.extractfile(bb)
-                hdr = f.read(20) if f else b""
-                check(hdr[:4] == b"\x7fELF", "bin/busybox 是 ELF")
-                if len(hdr) >= 20:
-                    check(struct.unpack_from("<H", hdr, 18)[0] == 0xB7, "bin/busybox 是 aarch64")
-            sh = members.get("bin/sh")
-            check(sh is not None and sh.issym() and sh.linkname == "busybox", "bin/sh → busybox 软链")
-            check("etc/os-release" in members, "etc/os-release 存在")
+    print("=== 4. 旧自研内核已移除 ===")
+    check(not any("libchlinux" in n for n in names), "libchlinux.so 不存在")
 
-    print("[旧内核残留]")
-    check("lib/arm64-v8a/libchlinux.so" not in names, "libchlinux.so 已移除")
-
-print("")
+print("=== 结果 ===")
 if fails:
-    print("门禁失败 %d 项，禁止交付：" % len(fails))
-    for f in fails:
-        print("  - " + f)
-    sys.exit(1)
-print("门禁 PASS")
+    print(f"FAIL {len(fails)} 项未通过"); sys.exit(1)
+print("PASS"); sys.exit(0)
