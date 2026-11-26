@@ -136,6 +136,18 @@ object ProotBridge {
                                             left -= n
                                         }
                                     }
+                                    // 关键：恢复 tar header 里的 mode（hdr[100..108] 八进制）。
+                                    // 不恢复的话 busybox 是 0644，/bin/sh 软链就不可执行，
+                                    // proot 报 "'/bin/sh' is not executable"。
+                                    var m = 0
+                                    for (i in 100 until 108) {
+                                        val c = hdr[i].toInt()
+                                        if (c == 0 || c == ' '.code) break
+                                        if (c in '0'.code..'7'.code) m = m * 8 + (c - '0'.code)
+                                    }
+                                    if (m != 0) {
+                                        try { android.system.Os.chmod(dst.path, m) } catch (_: Throwable) {}
+                                    }
                                 }
                             }
                             val pad = (512 - (size % 512)) % 512
