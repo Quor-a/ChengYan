@@ -5,6 +5,33 @@
 use crate::GuestMem;
 
 const PT_LOAD: u32 = 1;
+const PF_X: u32 = 1;
+const PF_W: u32 = 2;
+
+/// ELF 最低 PT_LOAD vaddr。
+///
+/// 恒等映射的 arena 必须从这里开始：非 PIE 的 busybox 写死 `0x400000`，
+/// 它内部算出来的每个指针都是那个基址上的绝对地址，arena 基址对不上就等于
+/// 整片内存错位。
+pub fn min_vaddr(bytes: &[u8]) -> Option<u64> {
+    if bytes.len() < 64 || &bytes[0..4] != b"\x7fELF" { return None; }
+    let mut r = Reader { b: bytes, off: 0 };
+    r.off = 0x36;
+    let e_phentsize = r.u16() as usize;
+    let e_phnum = r.u16() as usize;
+    let mut low: Option<u64> = None;
+    for i in 0..e_phnum {
+        r.off = 0x40 + i * e_phentsize;
+        if r.off + 32 > bytes.len() { break; }
+        let p_type = r.u32();
+        let _p_flags = r.u32();
+        let _p_offset = r.u64();
+        let p_vaddr = r.u64();
+        if p_type != PT_LOAD { continue; }
+        low = Some(low.map_or(p_vaddr, |l: u64| l.min(p_vaddr)));
+    }
+    low
+}
 
 struct Reader<'a> {
     b: &'a [u8],
@@ -53,10 +80,14 @@ pub fn load_static(mem: &mut GuestMem, bytes: &[u8], mem_size: u64) -> Result<cr
     }
 
     let mut max_end = 0u64;
+    let mut text: (u64, u64) = (u64::MAX, 0);
+    // 最低可写段起点：原生执行要把代码页设成 R-X，但如果某个可写段的起始页
+    // 和代码尾页共页，就不能整页锁掉，否则 guest 一写 .data 就段错误。
+    let mut wseg: u64 = 0;
     for i in 0..e_phnum as usize {
         r.off = 0x40 + i * e_phentsize as usize;
         let p_type = r.u32();
-        let _p_flags = r.u32();
+        let p_flags = r.u32();
         let p_offset = r.u64();
         let p_vaddr = r.u64();
         let _p_paddr = r.u64();
@@ -81,13 +112,30 @@ pub fn load_static(mem: &mut GuestMem, bytes: &[u8], mem_size: u64) -> Result<cr
         }
         // p_memsz > p_filesz 的 BSS 部分已是 0（flat mem 初始为 0）
         max_end = max_end.max(end);
+        // 可执行段区间：Tier1 只在这里面找 svc（扫全 arena 会误伤常量表）
+        if p_flags & PF_X != 0 && p_memsz > 0 {
+            text.0 = text.0.min(p_vaddr);
+            text.1 = text.1.max(end);
+        }
+        if p_flags & PF_W != 0 && p_memsz > 0 {
+            wseg = if wseg == 0 { p_vaddr } else { wseg.min(p_vaddr) };
+        }
     }
     if max_end == 0 {
         return Err("no PT_LOAD segments".into());
     }
+    if text.1 == 0 {
+        return Err("no executable segment".into());
+    }
     // 栈：顶在内存区上限下方 64KB，向下生长（guest 栈页从 stack_top 往低处）
     let stack_top = (mem_size - 0x1_0000) & !0xf;
-    Ok(crate::LoadedImage { entry: e_entry, stack_top, brk: (max_end + 0xfff) & !0xfff })
+    Ok(crate::LoadedImage {
+        entry: e_entry,
+        stack_top,
+        brk: (max_end + 0xfff) & !0xfff,
+        text,
+        wseg,
+    })
 }
 
 #[cfg(test)]

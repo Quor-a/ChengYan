@@ -9,12 +9,16 @@
 
 use crate::{Cpu, ExitReason, MemBackend};
 
+/// 当前执行的 guest pc（诊断用：内存越界报错时能定位到指令）。
+pub static CUR_PC: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum ShiftType { Lsl, Lsr, Asr, Ror }
 
 /// 执行一条指令。返回 None = 继续，Some(reason) = 退出。
 pub fn step<M: MemBackend>(cpu: &mut Cpu, mem: &mut M) -> Result<Option<ExitReason>, String> {
     let pc0 = cpu.pc;
+    CUR_PC.store(pc0, std::sync::atomic::Ordering::Relaxed);
     let instr = mem.read32(pc0).map_err(|e| format!("fetch {pc0:#x}: {e}"))?;
     cpu.pc = pc0.wrapping_add(4);
     exec(cpu, mem, instr, pc0)
@@ -210,7 +214,13 @@ fn exec<M: MemBackend>(cpu: &mut Cpu, mem: &mut M, i: u32, pc0: u64) -> Result<O
         return Ok(None);
     }
 
-    // ---- Conditional compare：CCMP/CCMN（imm/reg）----
+    // ---- Logical (shifted register)：AND/BIC/ORR/ORN/EOR/EON/ANDS/BICS ----
+    // sf opc:2 01010 shift:2 N Rm imm6 Rn Rd
+    // 注：重放时这里丢过 `if` 头与 sf/opc 定义，导致 exec 函数被提前闭合、
+    // 后面的整个 load/store 家族都成了顶层语句（引擎根本无法编译）。
+    if i & 0x1F00_0000 == 0x0A00_0000 {
+        let sf = i >> 31;
+        let opc = (i >> 29) & 3;
         let shift_t = ((i >> 22) & 3) as u8;
         let n = (i >> 21) & 1;
         let rm = ((i >> 16) & 31) as usize;
@@ -361,58 +371,63 @@ fn exec<M: MemBackend>(cpu: &mut Cpu, mem: &mut M, i: u32, pc0: u64) -> Result<O
         let rn = ((i >> 5) & 31) as usize;
         let rd = (i & 31) as usize;
         let a = reg_xzr(cpu, rn);
-        // DecodeBitMasks（ARM ARM 简化式）
-        let npipe = ((n as u64) << 6) | (!(imms as u64) & 0x3F);
-        let len = 64 - npipe.leading_zeros(); // highest set bit (1-based); 0=none
-        if len < 1 { return Ok(Some(Undef(i))); }
-        let levels = (1u64 << len) - 1;
-        let s_v = (imms as u64) & levels;
-        let r_v = (immr as u64) & levels;
-        if s_v == levels { return Ok(Some(Undef(i))); }
-        let esize = 1u64 << len;
-        let welem = (1u64 << (s_v + 1)) - 1;
-        // ROR(welem, R) in esize
-        let rotr = (r_v % esize) as u32;
-        let elem = welem.rotate_right(rotr) & (esize.wrapping_mul(2).checked_sub(1).map(|m| m & ((esize<<1)-1)).unwrap_or(u64::MAX));
-        // 注意 rotate_right 是 64 位上的旋转；welem < 2^esize，先放入低 esize 位再旋转取模 esize
-        let elem = welem.rotate_right(rotr) & (if esize == 64 { u64::MAX } else { esize - 1 }).wrapping_add(0).wrapping_mul(0).wrapping_add(if esize == 64 { u64::MAX } else { esize - 1 });
-        // 正确做法：把 welem 视作 esize 位，在 esize 位宽内旋转
-        let elem = if esize == 64 { welem.rotate_right(rotr) } else {
-            let w = welem & (esize - 1);
-            w.rotate_right(rotr) & (esize - 1) | (w.rotate_right(rotr) >> esize) & 0
-        };
-        let _ = elem;
-        // replicate elem 到 esize=64/32
-        let mut wmask = 0u64;
-        if esize == 64 {
-            wmask = welem.rotate_right(rotr);
+        // DecodeBitMasks(N, imms, immr) —— ARM ARM B2.3.4
+        // 注意 HighestSetBit 是 0-based。旧版写成 `64 - leading_zeros()`（1-based），
+        // len 多 1 → esize 从 64 变 128 → `and sp,x0,#-16` 的 wmask 算成 0x7f0，
+        // sp 被清 0，之后每个函数序言 `stp x29,x30,[sp,#-48]!` 写到 -48 直接崩。
+        let npipe: u64 = ((n as u64) << 6) | (!(imms as u64) & 0x3F); // N:NOT(imms)
+        if npipe == 0 {
+            return Ok(Some(Undef(i)));
+        }
+        let len: u32 = 63 - npipe.leading_zeros(); // 0-based HighestSetBit，取值 0..=6
+        let esize: u64 = 1u64 << len; // 8 / 16 / 32 / 64
+        let levels: u64 = esize - 1; // ZeroExtend(Ones(len), 6)
+        let s_v: u64 = (imms as u64) & levels;
+        let r_v: u64 = (immr as u64) & levels;
+        if s_v == levels {
+            return Ok(Some(Undef(i))); // immediate 形式下该编码非法
+        }
+        let welem: u64 = (1u64 << (s_v + 1)) - 1; // ZeroExtend(Ones(S+1), esize)
+        // 在 esize 位宽内 ROR(welem, R)，再 Replicate 铺满 64 位
+        let elem: u64 = if esize == 64 {
+            welem.rotate_right((r_v & 63) as u32)
         } else {
-            // 在 esize 位内旋转 welem
-            let w = welem & (esize - 1);
-            let r2 = w.rotate_right(rotr); // 64 位旋转后需折回
-            let rotated = ((w << (esize - rotr)) & (esize.wrapping_sub(1) << 0)) | (w >> rotr);
-            let _ = r2;
-            wmask = rotated;
-            // replicate 到 64 位
-            let mut acc = 0u64;
-            let mut filled = 0;
-            while filled < 64 {
-                acc |= wmask << filled;
-                filled += esize;
+            let m: u64 = (1u64 << esize) - 1;
+            let w: u64 = welem & m;
+            let s: u32 = (r_v % esize) as u32;
+            if s == 0 {
+                w
+            } else {
+                ((w >> s) | (w << (esize as u32 - s))) & m
             }
-            wmask = acc;
+        };
+        let mut wmask: u64 = 0;
+        let mut filled: u32 = 0;
+        while filled < 64 {
+            wmask |= elem << filled;
+            filled += esize as u32;
         }
         if std::env::var("CH_TRACE").is_ok() {
-            eprintln!("andimm: opc={} n={} imms={} immr={} len={} esize={} welem={:#x} wmask={:#x} a={:#x} rd={}", opc, n, imms, immr, len, esize, welem, wmask, a, rd);
+            eprintln!(
+                "andimm: opc={} n={} imms={} immr={} len={} esize={} welem={:#x} wmask={:#x} a={:#x} rd={}",
+                opc, n, imms, immr, len, esize, welem, wmask, a, rd
+            );
         }
         let r = match opc {
             0 => a & wmask,
             1 => a | wmask,
             2 => a ^ wmask,
-            3 => { set_flags_logical(cpu, a & wmask, sf); a & wmask }
+            3 => {
+                set_flags_logical(cpu, a & wmask, sf);
+                a & wmask
+            }
             _ => return Ok(Some(Undef(i))),
         };
-        if opc == 3 { set_xzr(cpu, rd, mask64(r, sf)); } else { set_sp(cpu, rd, mask64(r, sf)); }
+        if opc == 3 {
+            set_xzr(cpu, rd, mask64(r, sf));
+        } else {
+            set_sp(cpu, rd, mask64(r, sf));
+        }
         return Ok(None);
     }
 
@@ -557,7 +572,16 @@ fn exec<M: MemBackend>(cpu: &mut Cpu, mem: &mut M, i: u32, pc0: u64) -> Result<O
         let rn = ((i >> 5) & 31) as usize;
         let rm = ((i >> 16) & 31) as usize;
         let rd = (i & 31) as usize;
-        let is2src = sub2 == 2; // 2源族全部 bit11=1 bit10=0；1源/fcmp/fmov-imm 均 sub2==0（汇编器真值）
+        let is2src = sub2 == 2;
+        if std::env::var("CH_FPTRACE").is_ok() {
+            eprintln!(
+                "fp pc={:#x} i={i:08x} op12={op12:#05x} rtype={rtype} rn={rn}[{:#x}] rm={rm}[{:#x}] rd={rd}[{:#x}]",
+                cpu.pc.wrapping_sub(4),
+                cpu.q[rn] as u64,
+                cpu.q[rm] as u64,
+                cpu.q[rd] as u64
+            );
+        } // 2源族全部 bit11=1 bit10=0；1源/fcmp/fmov-imm 均 sub2==0（汇编器真值）
         let getf = |cpu: &Cpu, r: usize| -> f64 {
             let v = cpu.q[r];
             if rtype == 1 { f64::from_bits(v as u64) } else { f32::from_bits(v as u32) as f64 }
@@ -779,64 +803,74 @@ fn exec<M: MemBackend>(cpu: &mut Cpu, mem: &mut M, i: u32, pc0: u64) -> Result<O
         return Ok(None);
     }
 
-    // ---- Bitfield / shift immediate：UBFM(LSR/LSL/UBFX)/SBFM(ASR/SXTx/SBFX) ----
-    // sf opc:2 100110 N immr:6 imms:6 Rn Rd
+    // ---- Bitfield：SBFM(ASR/SBFX/SXTx) / BFM(BFI/BFXIL/BFC) / UBFM(LSR/LSL/UBFX) ----
+    // sf opc:2 100110 N immr:6 imms:6 Rn Rd      opc: 00=SBFM 01=BFM 10=UBFM
+    // 旧实现只写了 SBFM/UBFM，opc=1(BFM) 掉进 SBFM 分支算成符号扩展 ——
+    // musl 在 aarch64 上把 long double(f128) 用 `bfxil`+`bfi` 拼两个 64 位半字，
+    // BFM 算错 ⇒ strtod 全部返回 0 ⇒ awk 里 `print 42` 出 0、`1/2` 报除零。
     if i & 0x1F80_0000 == 0x1300_0000 {
         let sf = i >> 31;
-        let opc = (i >> 29) & 3; // 00=SBFM 10=UBFM
+        let opc = (i >> 29) & 3;
         let n = (i >> 22) & 1;
         let immr = ((i >> 16) & 63) as u64;
         let imms = ((i >> 10) & 63) as u64;
         let rn = ((i >> 5) & 31) as usize;
         let rd = (i & 31) as usize;
-        if opc == 3 || n != sf { return Ok(Some(Undef(i))); }
+        if opc == 3 || n != sf {
+            return Ok(Some(Undef(i)));
+        }
         let size: u64 = if sf == 1 { 64 } else { 32 };
-        let v = reg_xzr(cpu, rn) & (if size == 64 { u64::MAX } else { 0xFFFF_FFFF });
-        let ones = |w: u64| if w >= 64 { u64::MAX } else { (1u64 << w) - 1 };
-        let r = if opc == 2 {
-            // UBFM
-            if imms == size - 1 {
-                v >> immr // LSR #immr
-            } else if imms + 1 == immr {
-                let l = (size - immr) & (size - 1); // LSL #(size-immr)
-                if l >= 64 { 0 } else { v << l }
-            } else if imms >= immr {
-                (v >> immr) & ones(imms - immr + 1) // UBFX
+        let dmask: u64 = if size == 64 { u64::MAX } else { 0xFFFF_FFFF };
+        let src = reg_xzr(cpu, rn) & dmask;
+        let dst = reg_xzr(cpu, rd) & dmask;
+        let ones = |w: u64| -> u64 {
+            if w >= 64 {
+                u64::MAX
             } else {
-                // imms < immr：ROR 后取低 imms+1 位
-                let sh = (size - immr) & (size - 1);
-                let rot = if sh >= 64 { 0 } else { v << sh } | (v >> (immr & (size - 1)));
-                rot & ones(imms + 1)
-            }
-        } else {
-            // SBFM
-            let w = imms.wrapping_sub(immr).wrapping_add(1) & 63;
-            if imms == size - 1 {
-                let sh = immr & (size - 1);
-                if sh >= 64 { 0 } else { ((v << (0)) as i64) } // 占位，下面覆盖
-            } else if imms < immr {
-                let sh = (size - immr) & (size - 1);
-                let rot = (if sh >= 64 { 0 } else { v << sh }) | (v >> (immr & (size - 1)));
-                let w = imms + 1;
-                let sign = (rot >> (w - 1)) & 1;
-                let mask = ones(w);
-                if sign == 1 { (rot & mask) | !mask } else { rot & mask }
-            } else {
-                // SBFX：提取并符号扩展
-                let val = (v >> immr) & ones(w);
-                let sign = (val >> (w - 1)) & 1;
-                if sign == 1 { val | !ones(w) } else { val }
+                (1u64 << w) - 1
             }
         };
-        if opc == 0 && imms == size - 1 {
-            // ASR #immr（含 64 位正确符号移位）
-            let sh = immr & 63;
-            let r = (((v as i64) >> sh.min(63)) as u64).wrapping_sub((immr >= 64) as u64 * (v >> 63 & 1));
-            let r = if immr >= 64 { if v >> 63 == 1 { u64::MAX } else { 0 } } else { ((v as i64) >> sh) as u64 };
-            set_xzr(cpu, rd, if sf == 1 { r } else { (r as i32) as i64 as u64 });
-            return Ok(None);
-        }
-        set_xzr(cpu, rd, if sf == 1 { r } else { (r as i32) as i64 as u64 });
+        // datasize 位宽内的循环右移
+        let ror = |x: u64, r: u64| -> u64 {
+            let r = r % size;
+            let x = x & dmask;
+            if r == 0 {
+                x
+            } else {
+                ((x >> r) | (x << (size - r))) & dmask
+            }
+        };
+        let res: u64 = match opc {
+            2 => {
+                // UBFM
+                if imms >= immr {
+                    (src >> immr) & ones(imms - immr + 1)
+                } else {
+                    ror(src, immr) & ones(imms + 1)
+                }
+            }
+            0 => {
+                // SBFM：按取出的位宽做符号扩展（ASR / SBFX / SXTB/H/W）
+                let (v, w) = if imms >= immr {
+                    ((src >> immr) & ones(imms - immr + 1), imms - immr + 1)
+                } else {
+                    (ror(src, immr) & ones(imms + 1), imms + 1)
+                };
+                if (v >> (w - 1)) & 1 == 1 {
+                    (v | !ones(w)) & dmask
+                } else {
+                    v
+                }
+            }
+            _ => {
+                // BFM：只替换 mask 覆盖的位，其余保留 dst
+                // mask = ROR(Ones(imms+1), immr)，插入值 = ROR(src, immr)
+                let w = imms + 1;
+                let mask = ror(ones(w), immr);
+                (dst & !mask) | (ror(src, immr) & mask)
+            }
+        };
+        set_xzr(cpu, rd, res & dmask);
         return Ok(None);
     }
 
@@ -1127,104 +1161,185 @@ fn exec<M: MemBackend>(cpu: &mut Cpu, mem: &mut M, i: u32, pc0: u64) -> Result<O
     }
 
 
-    // ---- Load/Store register offset
-    // sf 0 0 11010110 Rm o2:3 00000 Rn Rd（mask 0x7FE0_0000 == 0x1AC0_0000）
+    // ---- Data processing (2 source)：udiv/sdiv/lslv/lsrv/asrv/rorv ----
+    // sf 00 11010110 Rm opcode(15:10) Rn Rd（family mask 0x7FE0_0000 == 0x1AC0_0000）
+    // 此前这块是空壳：算完 r 就丢弃、无条件返回 Undef，任何 udiv/sdiv 都直接崩。
     if i & 0x7FE0_0000 == 0x1AC0_0000 {
         let sf = i >> 31;
-        let op2 = (i >> 10) & 7;
+        let opcode = (i >> 10) & 0x3F;
         let rm = ((i >> 16) & 31) as usize;
         let rn = ((i >> 5) & 31) as usize;
         let rd = (i & 31) as usize;
         let a = reg_xzr(cpu, rn);
         let b = reg_xzr(cpu, rm);
-        let width = if sf == 1 { 64u32 } else { 32 };
-        let r = match op2 {
-            1 => { // udiv
-                if b == 0 { 0 } else { a / b }
+        let w: u32 = if sf == 1 { 64 } else { 32 };
+        let r: u64 = match opcode {
+            0b000010 => {
+                // UDIV：除零按 ARM 规定得 0
+                if b == 0 {
+                    0
+                } else if w == 64 {
+                    a / b
+                } else {
+                    ((a & 0xFFFF_FFFF) / (b & 0xFFFF_FFFF)) & 0xFFFF_FFFF
+                }
             }
-            2 => { // sdiv? 实际 sdiv=1? udiv=1, sdiv=2? ARM: SDIV o2=001(1)? — SDIV=1, UDIV=2? 正确：SDIV=0b001, UDIV=0b010
-                if b == 0 { 0 } else { ((a as i64) / (b as i64)) as u64 }
+            0b000011 => {
+                // SDIV
+                if b == 0 {
+                    0
+                } else if w == 64 {
+                    ((a as i64).wrapping_div(b as i64)) as u64
+                } else {
+                    (((a as u32 as i32).wrapping_div(b as u32 as i32)) as u32) as u64
+                }
             }
-            3 => a.wrapping_shl((b & (width as u64 - 1)) as u32), // lslv? o2=001 lslv... ARM: LSLV=0b001? 实际 LSLV=001, LSRV=010, ASRV=011, RORV=100, SDIV=001? — 按标准: SDIV=001? 不对。
+            0b001000 => {
+                // LSLV：移位量 >= 位宽 得 0
+                if b >= w as u64 {
+                    0
+                } else {
+                    a.wrapping_shl(b as u32) & mask64(u64::MAX, sf)
+                }
+            }
+            0b001001 => {
+                // LSRV
+                if b >= w as u64 {
+                    0
+                } else if w == 64 {
+                    a >> b
+                } else {
+                    ((a & 0xFFFF_FFFF) >> b) & 0xFFFF_FFFF
+                }
+            }
+            0b001010 => {
+                // ASRV：算术右移，超宽按符号填满
+                if w == 64 {
+                    ((a as i64) >> (b.min(63) as u32)) as u64
+                } else {
+                    (((a as u32 as i32) >> (b.min(31) as u32)) as u32) as u64
+                }
+            }
+            0b001011 => {
+                // RORV
+                if w == 64 {
+                    a.rotate_right((b & 63) as u32)
+                } else {
+                    ((a as u32).rotate_right((b & 31) as u32)) as u64
+                }
+            }
             _ => return Ok(Some(Undef(i))),
         };
-        let _ = r;
-        return Ok(Some(Undef(i)));
+        set_xzr(cpu, rd, mask64(r, sf));
+        return Ok(None);
     }
 
-    // ---- Data processing (1 source)：rev/rev16/rev32/clz/cls/rbit/neg ----
-    // sf 0 0 11010110 opcode:6 00000 Rn Rd（mask 0x7FE0_0000 == 0x5AC0_0000）
-    if i & 0x7FE0_0000 == 0x5AC0_0000 {
+    // ---- Data processing (1 source)：rbit/rev16/rev32/rev/clz/cls ----
+    // sf 1 011010110 opcode2(20:16)=00000 opcode(15:10) Rn Rd
+    // 此前同样是空壳：算完丢结果、无条件 Undef。
+    if i & 0x7FE0_FC00 == 0x5AC0_0000 {
         let sf = i >> 31;
         let opcode = (i >> 10) & 0x3F;
         let rn = ((i >> 5) & 31) as usize;
         let rd = (i & 31) as usize;
         let a = reg_xzr(cpu, rn);
-        let width = if sf == 1 { 64u32 } else { 32 };
-        let r = match opcode {
-            0 => a.rotate_right(8) & 0x00FF_00FF_00FF_00FF, // rbit? 实际 rbit=0; 需精确
+        let w: u32 = if sf == 1 { 64 } else { 32 };
+        let v = if w == 64 { a } else { a & 0xFFFF_FFFF };
+        let r: u64 = match opcode {
+            0b000000 => {
+                // RBIT
+                let mut o = 0u64;
+                for k in 0..w {
+                    if (v >> k) & 1 == 1 {
+                        o |= 1u64 << (w as u64 - 1 - k as u64);
+                    }
+                }
+                o
+            }
+            0b000001 => {
+                // REV16：每 16 位内交换两字节
+                let mut o = 0u64;
+                for k in 0..(w / 16) {
+                    let h = (v >> (16 * k)) & 0xFFFF;
+                    o |= (((h & 0xFF) << 8) | (h >> 8)) << (16 * k);
+                }
+                o
+            }
+            0b000010 => {
+                if sf == 1 {
+                    // REV32：每个 32 位半字内交换四字节
+                    ((v as u32).swap_bytes() as u64) | (((v >> 32) as u32).swap_bytes() as u64) << 32
+                } else {
+                    // sf=0 的 000010 是 REV（32 位全反转）
+                    (v as u32).swap_bytes() as u64
+                }
+            }
+            0b000011 => {
+                // REV（仅 sf=1）：64 位全反转
+                if sf == 1 { v.swap_bytes() } else { return Ok(Some(Undef(i))) }
+            }
+            0b000100 => {
+                // CLZ
+                if w == 64 { v.leading_zeros() as u64 } else { (v as u32).leading_zeros() as u64 }
+            }
+            0b000101 => {
+                // CLS：与符号位相同的连续位数 - 1
+                let sign = if w == 64 { (v >> 63) & 1 } else { (v >> 31) & 1 };
+                let mut cnt = 0u64;
+                let mut k = 0u32;
+                while k < w {
+                    let bit = (v >> (w - 1 - k)) & 1;
+                    if bit != sign {
+                        break;
+                    }
+                    cnt += 1;
+                    k += 1;
+                }
+                cnt.saturating_sub(1)
+            }
             _ => return Ok(Some(Undef(i))),
         };
-        let _ = r; let _ = width;
-        return Ok(Some(Undef(i)));
-    }
-
-    // ---- Load/Store register offset：ldr/str xt, [xn, xm, lsl #n / sxtx] ----
-    // size 11 V 01 1 0 Rm option(13:11) S(12) 10 Rn Rt（family: 0xF860_0800 掩码 0xFFC0_0C00 内 32/64 位）
-    if i & 0x3F80_0C00 == 0x3800_0800 {
-        let size = (i >> 30) & 3;
-        let opc = (i >> 22) & 3;
-        let rm = ((i >> 16) & 31) as usize;
-        let option = (i >> 13) & 7;
-        let sh = (i >> 12) & 1;
-        let rn = ((i >> 5) & 31) as usize;
-        let rt = (i & 31) as usize;
-        let m = cpu.x[rm];
-        let shift = sh * size; // 位移量 = S × log2(元素字节数)=S×size（ldrh uxtw#1→1，ldr x uxtx S=1→3）
-        let off = match option {
-            3 => m.wrapping_shl(shift),                          // lsl
-            7 => m.wrapping_shl(shift),                          // sxtx（64 位同值）
-            2 => ((m & 0xFFFF_FFFF) as u64).wrapping_shl(shift), // uxtw
-            6 => (((m & 0xFFFF_FFFF) as i32) as i64 as u64).wrapping_shl(shift), // sxtw
-            _ => return Ok(Some(Undef(i))),
-        };
-        let addr = reg_sp(cpu, rn).wrapping_add(off);
-        match (size, opc) {
-            (3, 1) => { let v = mem.read64(addr)?; set_xzr(cpu, rt, v); }
-            (3, 0) => { mem.write64(addr, reg_xzr(cpu, rt))?; }
-            (2, 1) => { let v = mem.read64(addr)?; set_xzr(cpu, rt, v & 0xFFFF_FFFF); }
-            (2, 2) => { let v = mem.read64(addr)?; let w = v & 0xFFFF_FFFF; set_xzr(cpu, rt, ((w as u32) as i32) as i64 as u64); } // ldrsw
-            (2, 0) => { mem.write64(addr, reg_xzr(cpu, rt) & 0xFFFF_FFFF)?; }
-            _ => return Ok(Some(Undef(i))),
-        }
+        set_xzr(cpu, rd, mask64(r, sf));
         return Ok(None);
     }
 
-    // ---- Load/Store register offset：ldr/str xt, [xn, xm, lsl #n / sxtx] ----
-    // size 11 V 01 1 0 Rm option(13:11) S(12) 10 Rn Rt（family: 0xF860_0800 掩码 0xFFC0_0C00 内 32/64 位）
+    // ---- Load/Store register offset（V=0）：strb/strh/str/ldrb/ldrh/ldr/ldrsw ----
+    // size(31:30) 111 0(26) 00 opc(23:22) 1 Rm(20:16) option(15:13) S(12) 10 Rn Rt
+    // 此前只写了 size=3/2（8/4 字节），字节与半字（size=0/1）一律 Undef ——
+    // busybox 的 memset/memcpy 走到 `strb wzr,[x23,x25]` 就直接崩（真机 ls 崩点）。
     if i & 0x3F80_0C00 == 0x3800_0800 {
-        let size = (i >> 30) & 3;
+        let size = ((i >> 30) & 3) as u32;
         let opc = (i >> 22) & 3;
         let rm = ((i >> 16) & 31) as usize;
         let option = (i >> 13) & 7;
         let sh = (i >> 12) & 1;
         let rn = ((i >> 5) & 31) as usize;
         let rt = (i & 31) as usize;
-        let m = cpu.x[rm];
-        let shift = if sh == 1 { 3 } else { 0 };
+        let m = reg_xzr(cpu, rm);
+        let shift = sh * size; // 位移量 = S × log2(元素字节数)
         let off = match option {
-            3 => m.wrapping_shl(shift),                          // lsl
-            7 => m.wrapping_shl(shift),                          // sxtx（64 位同值）
-            2 => ((m & 0xFFFF_FFFF) as u64).wrapping_shl(shift), // uxtw
+            3 | 7 => m.wrapping_shl(shift),                                  // lsl / sxtx
+            2 => ((m & 0xFFFF_FFFF) as u64).wrapping_shl(shift),             // uxtw
             6 => (((m & 0xFFFF_FFFF) as i32) as i64 as u64).wrapping_shl(shift), // sxtw
             _ => return Ok(Some(Undef(i))),
         };
         let addr = reg_sp(cpu, rn).wrapping_add(off);
+        let rv = reg_xzr(cpu, rt);
         match (size, opc) {
-            (3, 1) => { let v = mem.read64(addr)?; set_xzr(cpu, rt, v); }
-            (3, 0) => { mem.write64(addr, reg_xzr(cpu, rt))?; }
-            (2, 1) => { let v = mem.read64(addr)?; set_xzr(cpu, rt, v & 0xFFFF_FFFF); }
-            (2, 0) => { mem.write64(addr, reg_xzr(cpu, rt) & 0xFFFF_FFFF)?; }
+            (0, 0) => st8(mem, addr, rv & 0xFF)?,                              // strb
+            (0, 1) => { let v = ld8(mem, addr)?; set_xzr(cpu, rt, v & 0xFF); } // ldrb
+            (0, 2) => { let v = ld8(mem, addr)?; set_xzr(cpu, rt, (((v & 0xFF) as u8) as i8 as i32) as u32 as u64); } // ldrsb(w)
+            (0, 3) => { let v = ld8(mem, addr)?; set_xzr(cpu, rt, ((v & 0xFF) as u8 as i8) as i64 as u64); }            // ldrsb(x)
+            (1, 0) => st16(mem, addr, rv & 0xFFFF)?,                           // strh
+            (1, 1) => { let v = ld16(mem, addr)?; set_xzr(cpu, rt, v & 0xFFFF); } // ldrh
+            (1, 2) => { let v = ld16(mem, addr)?; set_xzr(cpu, rt, (((v & 0xFFFF) as u16) as i16 as i32) as u32 as u64); } // ldrsh(w)
+            (1, 3) => { let v = ld16(mem, addr)?; set_xzr(cpu, rt, ((v & 0xFFFF) as u16 as i16) as i64 as u64); }        // ldrsh(x)
+            (2, 0) => st32(mem, addr, rv & 0xFFFF_FFFF)?,                      // str w
+            (2, 1) => { let v = mem.read32(addr)?; set_xzr(cpu, rt, v as u64); }                                  // ldr w
+            (2, 2) => { let v = mem.read32(addr)?; set_xzr(cpu, rt, ((v as u32) as i32) as i64 as u64); }         // ldrsw
+            (3, 0) => mem.write64(addr, rv)?,                                 // str x
+            (3, 1) => { let v = mem.read64(addr)?; set_xzr(cpu, rt, v); }     // ldr x
+            (3, 2) => {}                                                      // prfm：无副作用
             _ => return Ok(Some(Undef(i))),
         }
         return Ok(None);
@@ -1263,7 +1378,7 @@ fn exec<M: MemBackend>(cpu: &mut Cpu, mem: &mut M, i: u32, pc0: u64) -> Result<O
         let addr = reg_sp(cpu, rn);
         if l == 1 {
             let mut buf = Vec::with_capacity(total as usize);
-            for k in 0..total { buf.push(mem.read8(addr.wrapping_add(k))?); }
+            for k in 0..total { buf.push(ld8(mem, addr.wrapping_add(k))? as u8); }
             let mut pos = 0usize;
             for r in 0..regs as usize {
                 let mut v = 0u128;
@@ -1275,7 +1390,7 @@ fn exec<M: MemBackend>(cpu: &mut Cpu, mem: &mut M, i: u32, pc0: u64) -> Result<O
             let mut pos = 0usize;
             for r in 0..regs as usize {
                 let v = cpu.q[(rt + r) & 31];
-                for b in 0..regbytes as usize { st8(mem, addr.wrapping_add(pos + b), (v >> (8 * b)) as u8)?; }
+                for b in 0..regbytes as usize { st8(mem, addr.wrapping_add((pos + b) as u64), ((v >> (8 * b)) as u8) as u64)?; }
                 pos += regbytes as usize;
             }
         }
@@ -1451,7 +1566,9 @@ fn exec<M: MemBackend>(cpu: &mut Cpu, mem: &mut M, i: u32, pc0: u64) -> Result<O
             (0, 2, 0) => ld8(mem, addr).map(|b| { set_xzr(cpu, rt, (b as u8 as i8 as i64) as u64); true }),  // ldursb x
             (0, 3, 0) => ld8(mem, addr).map(|b| { set_xzr(cpu, rt, ((b as u8 as i8 as i32) as u32) as u64); true }), // ldursb w
             (1, 3, 0) => ld16(mem, addr).map(|h| { set_xzr(cpu, rt, ((h as u16 as i16 as i32 as u32) as u64)); true }), // ldrsh (32)
-            _ => Err(format!("unsupported size/opc {size}/{opc}")),
+            _ => Err(format!("unsupported size/opc/v {size}/{opc}/{v}")),
+        };
+        done?;
         if mode == 1 {
             set_sp(cpu, rn, base_val.wrapping_add(off));
         }
@@ -1460,7 +1577,10 @@ fn exec<M: MemBackend>(cpu: &mut Cpu, mem: &mut M, i: u32, pc0: u64) -> Result<O
 
     // ---- Load/Store unsigned immediate (ldr/str) ----
     // size:2 1 1 [opc:2] 1 [imm12] Rn Rt
-    if i & 0x3B00_0000 == 0x3900_0000 && ((i >> 26) & 1 == 1 || (i >> 22) & 3 < 2) {
+    // 入口只按 size/class 位判定：旧版外加了 `(V==1 || opc<2)` 的附加条件，
+    // 把 GPR 的 ldrsw（size=2,opc=2,V=0，编码如 0xb9800000）整类排除在外，
+    // 于是它落到函数末尾兜底 = 静默 NOP，寄存器不被写 → 后续整个指针链算飞。
+    if i & 0x3B00_0000 == 0x3900_0000 {
         let size = (i >> 30) & 3;
         let opc = (i >> 22) & 3;
         let imm12 = (i >> 10) & 0xFFF;
@@ -1469,33 +1589,120 @@ fn exec<M: MemBackend>(cpu: &mut Cpu, mem: &mut M, i: u32, pc0: u64) -> Result<O
         let scale = if (i >> 26) & 1 == 1 && opc >= 2 { 4 } else { size }; // SIMD Q ×16；GPR 按 size
         let off = (imm12 as u64) << scale;
         let addr = reg_sp(cpu, rn).wrapping_add(off);
-        match (size, opc) {
-            (0, 2) => { // str qt
+        let v = (i >> 26) & 1;
+        // GPR（V=0）与 SIMD（V=1）两套通道：旧版本这里混入了三元组 arm，
+        // 导致 match 元数不匹配、整个 load/store unsigned immediate 家族无法编译
+        // （等于 ldr/str 的正偏移形式全部缺失 —— busybox 几乎所有内存访问都走它）。
+        let done = match (size, opc, v) {
+            // ---- GPR ----
+            (0, 0, 0) => st8(mem, addr, reg_xzr(cpu, rt)).map(|_| true),            // strb
+            (0, 1, 0) => ld8(mem, addr).map(|x| { set_xzr(cpu, rt, x); true }),     // ldrb
+            (1, 0, 0) => st16(mem, addr, reg_xzr(cpu, rt)).map(|_| true),           // strh
+            (1, 1, 0) => ld16(mem, addr).map(|x| { set_xzr(cpu, rt, x); true }),    // ldrh
+            (2, 0, 0) => st32(mem, addr, reg_xzr(cpu, rt)).map(|_| true),           // str w
+            (2, 1, 0) => mem.read32(addr).map(|x| { set_xzr(cpu, rt, x as u64); true }), // ldr w
+            (3, 0, 0) => mem.write64(addr, reg_xzr(cpu, rt)).map(|_| true),         // str x
+            (3, 1, 0) => mem.read64(addr).map(|x| { set_xzr(cpu, rt, x); true }),   // ldr x
+            (2, 2, 0) => mem.read32(addr).map(|x| { set_xzr(cpu, rt, x as i32 as i64 as u64); true }), // ldrsw
+            // ---- SIMD 128 位（V=1）----
+            (0, 2, 1) => { // str q
                 let lo = (cpu.q[rt] & u64::MAX as u128) as u64;
                 let hi = (cpu.q[rt] >> 64) as u64;
-                mem.write64(addr, lo)?; mem.write64(addr.wrapping_add(8), hi)?;
+                mem.write64(addr, lo)?;
+                mem.write64(addr.wrapping_add(8), hi).map(|_| true)
             }
-            (0, 3, 1) => { // ldr qt
+            (0, 3, 1) => { // ldr q
                 let lo = mem.read64(addr)? as u128;
                 let hi = mem.read64(addr.wrapping_add(8))? as u128;
                 cpu.q[rt] = lo | (hi << 64);
                 Ok(true)
             }
-            (3, 0, 0) => mem.write64(addr, reg_xzr(cpu, rt)).map(|_| true),
-            (3, 1, 0) => mem.read64(addr).map(|v| { set_xzr(cpu, rt, v); true }),
-            (2, 0, 0) => mem.write64(addr, reg_xzr(cpu, rt) & 0xFFFF_FFFF).map(|_| true),
-            (2, 1, 0) => mem.read64(addr).map(|v| { set_xzr(cpu, rt, v & 0xFFFF_FFFF); true }),
-            (0, 0, 0) => st8(mem, addr, reg_xzr(cpu, rt)).map(|_| true),           // strb
-            (0, 1, 0) => ld8(mem, addr).map(|v| { set_xzr(cpu, rt, v); true }),    // ldrb
-            (1, 0, 0) => st16(mem, addr, reg_xzr(cpu, rt)).map(|_| true),          // strh
-            (1, 1, 0) => ld16(mem, addr).map(|v| { set_xzr(cpu, rt, v); true }),   // ldrh
-            _ => Err(format!("unsupported size/opc {size}/{opc}")),
+            // ---- SIMD 窄元素（V=1, opc<2）：把 1/2/4/8 字节塞进 q 寄存器低位 ----
+            (0, 0, 1) => st8(mem, addr, cpu.q[rt] as u64).map(|_| true),
+            (0, 1, 1) => ld8(mem, addr).map(|x| { cpu.q[rt] = x as u128; true }),
+            (1, 0, 1) => st16(mem, addr, cpu.q[rt] as u64).map(|_| true),
+            (1, 1, 1) => ld16(mem, addr).map(|x| { cpu.q[rt] = x as u128; true }),
+            (2, 0, 1) => st32(mem, addr, cpu.q[rt] as u64).map(|_| true),
+            (2, 1, 1) => mem.read32(addr).map(|x| { cpu.q[rt] = x as u128; true }),
+            (3, 0, 1) => mem.write64(addr, cpu.q[rt] as u64).map(|_| true),
+            (3, 1, 1) => mem.read64(addr).map(|x| { cpu.q[rt] = x as u128; true }),
+            (3, 2, 0) => Ok(true), // prfm：预取提示，无副作用
+            _ => Err(format!("unsupported size/opc/v {size}/{opc}/{v}")),
+        };
+        done?;
+        return Ok(None);
+    }
+
+    // 兜底：走到这里说明指令未被任何分支识别（各分支都以 return 结束）。
+    // 默认视作 NOP 继续（提示/屏障类指令无害），但 CH_STRICT=1 时判 Undef，
+    // 用来把所有漏实现的指令一次性揪出来，而不是被静默吞掉。
+    if std::env::var("CH_STRICT").is_ok() {
+        return Ok(Some(Undef(i)));
+    }
+    #[allow(unreachable_code)]
+    Ok(None)
 }
 
 /* ---------- 寄存器 / 位段工具 ---------- */
 
 fn reg(cpu: &Cpu, r: usize, _sf: u32) -> u64 { reg_xzr(cpu, r) }
 fn set_reg(cpu: &mut Cpu, r: usize, v: u64) { set_xzr(cpu, r, v) }
+
+/// 窄宽度存储：MemBackend 只暴露 32/64 位访问，8/16/32 位用 8 字节
+/// 对齐的读-改-写实现（跨 8 字节边界时拆成两次）。
+fn st8<M: MemBackend>(mem: &mut M, a: u64, v: u64) -> Result<(), String> {
+    let base = a & !7u64;
+    let old = mem.read64(base)?;
+    let sh = ((a & 7) * 8) as u32;
+    let mask = !(0xFFu64 << sh);
+    mem.write64(base, (old & mask) | ((v & 0xFF) << sh))
+}
+
+fn st16<M: MemBackend>(mem: &mut M, a: u64, v: u64) -> Result<(), String> {
+    if a & 7 <= 6 {
+        let base = a & !7u64;
+        let old = mem.read64(base)?;
+        let sh = ((a & 7) * 8) as u32;
+        let mask = !(0xFFFFu64 << sh);
+        mem.write64(base, (old & mask) | ((v & 0xFFFF) << sh))
+    } else {
+        st8(mem, a, v & 0xFF)?;
+        st8(mem, a + 1, (v >> 8) & 0xFF)
+    }
+}
+
+fn st32<M: MemBackend>(mem: &mut M, a: u64, v: u64) -> Result<(), String> {
+    if a & 7 <= 4 {
+        let base = a & !7u64;
+        let old = mem.read64(base)?;
+        let sh = ((a & 7) * 8) as u32;
+        let mask = !(0xFFFF_FFFFu64 << sh);
+        mem.write64(base, (old & mask) | ((v & 0xFFFF_FFFF) << sh))
+    } else {
+        st16(mem, a, v & 0xFFFF)?;
+        st16(mem, a + 2, (v >> 16) & 0xFFFF)
+    }
+}
+
+fn ld8<M: MemBackend>(mem: &M, a: u64) -> Result<u64, String> {
+    let base = a & !7u64;
+    let w = mem.read64(base)?;
+    let sh = ((a & 7) * 8) as u32;
+    Ok((w >> sh) & 0xFF)
+}
+
+fn ld16<M: MemBackend>(mem: &M, a: u64) -> Result<u64, String> {
+    if a & 7 <= 6 {
+        let base = a & !7u64;
+        let w = mem.read64(base)?;
+        let sh = ((a & 7) * 8) as u32;
+        Ok((w >> sh) & 0xFFFF)
+    } else {
+        let lo = ld8(mem, a)?;
+        let hi = ld8(mem, a + 1)?;
+        Ok(lo | (hi << 8))
+    }
+}
 
 /// GPR 语境：31 = XZR（读 0，写丢弃）。
 fn reg_xzr(cpu: &Cpu, r: usize) -> u64 { if r == 31 { 0 } else { cpu.x[r] } }

@@ -9,4 +9,6 @@ crate-type = ["cdylib"]
 
 [dependencies]
 ch-host = { path = "../host" }
-jni = "0.21"
+ch-kernel = { path = "../kernel" }
+# JNI 绑定自带（src/jni_min.rs）：`jni` crate 的传递依赖要在宿主平台链接，
+# 交叉编译机上缺宿主链接器时整包编不出来。

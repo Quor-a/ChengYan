@@ -7,8 +7,27 @@ name = "ch-engine"
 version = "0.1.0"
 
 [[package]]
+name = "ch-host"
+version = "0.1.0"
+dependencies = [
+ "ch-engine",
+ "ch-kernel",
+]
+
+[[package]]
+name = "ch-jnihost"
+version = "0.1.0"
+dependencies = [
+ "ch-host",
+ "ch-kernel",
+]
+
+[[package]]
 name = "ch-kernel"
 version = "0.1.0"
+dependencies = [
+ "ch-engine",
+]
 
 [[package]]
 name = "ch-runner"

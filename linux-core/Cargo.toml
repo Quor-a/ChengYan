@@ -1,6 +1,11 @@
 [workspace]
-members = ["kernel", "engine", "runner"]
+members = ["kernel", "engine", "host", "runner", "jnihost"]
 resolver = "2"
 
 [profile.dev]
 debug = 1
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
