@@ -48,7 +48,7 @@
 
     <!-- extractNativeLibs=true：让系统把 jniLibs 解到 /data/app/.../lib/arm64/ 再 dlopen，
          而不是直接从 APK 里 mmap。后者要求 APK 内 so 严格页对齐，一旦被第三方安装器
-         重新打包/对齐就会 dlopen 失败（终端直接起不来）。解包路径最稳。 -->
+         重新打包/对齐就会 dlopen 失败。解包路径最稳。 -->
     <application android:usesCleartextTraffic="true"
         android:name=".ChengYanApp"
         android:extractNativeLibs="true"

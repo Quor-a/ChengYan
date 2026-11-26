@@ -1,8 +1,0 @@
-[package]
-name = "ch-host"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-ch-engine = { path = "../engine" }
-ch-kernel = { path = "../kernel" }

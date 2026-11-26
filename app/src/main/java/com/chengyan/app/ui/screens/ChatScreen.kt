@@ -75,7 +75,7 @@ private val dayFmt = SimpleDateFormat("M月d日", Locale.getDefault())
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
-fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit, onOpenPrefs: () -> Unit = {}, onOpenTerminal: () -> Unit = {}) {
+fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit, onOpenPrefs: () -> Unit = {}) {
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed, confirmStateChange = { true })
     val scope = rememberCoroutineScope()
     val openDrawer = { scope.launch { drawerState.open() } }
@@ -200,11 +200,6 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit, onOpenPrefs: () ->
                                 text = { Text("手机能力授权", fontSize = 14.sp) },
                                 onClick = { menuOpen = false; phoneDialog = true },
                                 leadingIcon = { Icon(Icons.Rounded.PhoneAndroid, null, Modifier.size(17.dp), tint = Ink3) },
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Linux 终端", fontSize = 14.sp) },
-                                onClick = { menuOpen = false; onOpenTerminal() },
-                                leadingIcon = { Text("⌨", fontSize = 13.sp, color = Ink3) },
                             )
                             DropdownMenuItem(
                                 text = { Text("模型配置", fontSize = 14.sp) },

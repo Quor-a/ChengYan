@@ -1,9 +1,0 @@
-# 澄言 Linux —— CPU 引擎
-# P2 里程碑：Tier 0 解释器（A64 解码+执行子集）。Tier 1 同 ISA DBT（C/asm）在 P4 接入。
-
-[package]
-name = "ch-engine"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
