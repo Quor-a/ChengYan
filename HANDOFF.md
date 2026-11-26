@@ -25,6 +25,12 @@ TerminalScreen (Compose UI，保留原样)
 2. **静态 ET_EXEC 不能做 PIE 门控**：`libbash.so`/`libbusybox.so`/`libloader.so` 都是 e_type=2 无 PT_INTERP，内核 binfmt_elf 直接映射执行；`isPieElf` 误判跳过建链 → exec 不存在的文件 → 终端必死。
 3. **软链失败必须退实体拷贝**：云手机 FUSE FS 不支持 symlink；只 Log+return 会导致 usr/bin/cy-bash 不存在 → 黑屏。
 
+## UI 说明（终端页）
+`TerminalScreen.kt` 保持形态：顶栏 / 输出区 / 快捷键行 / 输入行。
+视觉为澄言原创暖墨终端配色（TermTheme）：三层底色递进、状态徽章、等宽输出字、
+快捷键横向滚动（防挤压）、重建键危险色。所有阻塞 API（ensure/poll/run/restart）已在 IO 线程调用，
+**新增任何调 LinuxBridge 的代码必须切 IO，否则 ANR**。
+
 ## 2. 资产清单（全部已入库）
 
 - `app/src/main/assets/alpine-minirootfs-3.24.0-aarch64.tar.gz` — 4,043,766 B，515 文件，sha256 `4b8cd66a6688b2a87276c39843ed89c3a06d9534fc6a5823c586aff2696c1f2a`，VERSION_ID=3.24.0，含 busybox/sh/apk/musl 动态链接器
