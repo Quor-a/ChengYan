@@ -173,6 +173,10 @@ pub struct Session {
     /// 每条命令都要读一次 ELF（PIE 之后每次都要重新装载），不做缓存的话
     /// busybox 那 1.1MB 每条命令都要从闪存/页缓存里再拷一遍。
     prog_cache: Mutex<BTreeMap<String, (u64, Arc<Vec<u8>>)>>,
+    /// 绑定的 PTY 从端（真终端路径）。Some 时 guest 的 0/1/2 走线路规程，
+    /// 宿主通过 feed/take_output 驱动；None 时保留旧的注入缓冲执行器语义。
+    pub console: Mutex<Option<ch_kernel::console::TtyRef>>,
+    pub console_id: std::sync::atomic::AtomicI32,
 }
 
 impl Session {
@@ -200,6 +204,8 @@ impl Session {
             env: Mutex::new(env),
             last_status: AtomicI32::new(0),
             prog_cache: Mutex::new(BTreeMap::new()),
+            console: Mutex::new(None),
+            console_id: std::sync::atomic::AtomicI32::new(-1),
         })
     }
 
@@ -428,6 +434,10 @@ impl Session {
         proc.out = out;
         proc.err = err;
         proc.out_cap = cap;
+        // 真终端：把 0/1/2 绑到 PTY 从端；ECHO/ICANON/^C 由线路规程处理。
+        if let Some(t) = self.console.lock().unwrap().as_ref() {
+            proc.set_tty(t.clone());
+        }
         // stdin 注入：管道/here 数据由宿主预置，guest read(0) 从游标读
         proc.stdin = std::io::Cursor::new(stdin.to_vec());
 
@@ -521,6 +531,44 @@ impl Session {
     }
 
     /// 跑一条 argv，stdout/stderr 分别捕获（管道段、重定向用）。
+    // ---- 真终端（Appine console 协议）----
+    // 宿主只做 open / feed / take_output / resize，不碰 guest 内存与 fd。
+
+    pub fn open_console(&self, row: u16, col: u16) -> Result<i32, String> {
+        let id = ch_kernel::console::open(ch_kernel::tty::Winsize::new(row, col))?;
+        let tty = ch_kernel::console::slave(id)?;
+        ch_kernel::console::attach(id)?;
+        *self.console.lock().unwrap() = Some(tty);
+        self.console_id.store(id as i32, std::sync::atomic::Ordering::Relaxed);
+        Ok(id as i32)
+    }
+
+    /// 宿主往主端喂字节；返回线路规程识别出的信号号（2=SIGINT 等）。
+    pub fn feed(&self, data: &[u8]) -> Result<Vec<i64>, String> {
+        let id = self.console_id.load(std::sync::atomic::Ordering::Relaxed);
+        if id < 0 { return Err("终端未打开".into()); }
+        Ok(ch_kernel::console::feed(id as u32, data)?
+            .into_iter().map(|s| s.number()).collect())
+    }
+
+    pub fn take_output(&self, max: usize) -> Result<Vec<u8>, String> {
+        let id = self.console_id.load(std::sync::atomic::Ordering::Relaxed);
+        if id < 0 { return Err("终端未打开".into()); }
+        Ok(ch_kernel::console::take_output(id as u32, max)?.unwrap_or_default())
+    }
+
+    pub fn resize_console(&self, row: u16, col: u16) -> Result<(), String> {
+        let id = self.console_id.load(std::sync::atomic::Ordering::Relaxed);
+        if id < 0 { return Err("终端未打开".into()); }
+        ch_kernel::console::resize(id as u32, ch_kernel::tty::Winsize::new(row, col))
+    }
+
+    pub fn close_console(&self) {
+        let id = self.console_id.swap(-1, std::sync::atomic::Ordering::Relaxed);
+        if id >= 0 { ch_kernel::console::close(id as u32); }
+        *self.console.lock().unwrap() = None;
+    }
+
     pub fn run_capture(&self, argv: &[String], stdin: &[u8], cwd: &str) -> ExecResult {
         let o: SharedOut = Arc::new(Mutex::new(Vec::new()));
         let e: SharedOut = Arc::new(Mutex::new(Vec::new()));

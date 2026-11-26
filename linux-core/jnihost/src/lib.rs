@@ -461,3 +461,89 @@ unimpl_total={} unimpl={}",
     });
     mk_string(env, &text)
 }
+
+// ---- 真终端（PTY / line discipline）---------------------------------
+//
+// Appine 的 console 协议：宿主只喂字节和取输出，不碰 guest 内存。
+// 这里用 String 传字节（终端数据流是 UTF-8/ASCII + 控制字符），
+// 避免为 byte[] 扩展自研 JNI vtable 的那层风险。
+
+#[no_mangle]
+pub extern "system" fn Java_com_chengyan_app_data_LinuxNative_openConsole(
+    env: *mut JNIEnv,
+    _c: jclass,
+    handle: jlong,
+    row: jint,
+    col: jint,
+) -> jlong {
+    guard("openConsole", -1, || {
+        let Some(m) = machine_of(handle) else { return -2; };
+        match m.session.open_console(row.max(1) as u16, col.max(1) as u16) {
+            Ok(id) => id as jlong,
+            Err(e) => { set_err(format!("openConsole: {e}")); -3 }
+        }
+    })
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_chengyan_app_data_LinuxNative_feed(
+    _env: *mut JNIEnv,
+    _c: jclass,
+    handle: jlong,
+    data: jstring,
+) -> jint {
+    guard("feed", -1, || {
+        let Some(m) = machine_of(handle) else { return -2; };
+        let Some(s) = get_string(_env, data) else { return -3; };
+        // ^C 这类控制字符在 Java String 里就是 U+0003，UTF-8 后仍是 0x03。
+        match m.session.feed(s.as_bytes()) {
+            Ok(sigs) => sigs.iter().sum::<i64>() as jint,
+            Err(e) => { set_err(format!("feed: {e}")); -4 }
+        }
+    })
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_chengyan_app_data_LinuxNative_takeOutput(
+    env: *mut JNIEnv,
+    _c: jclass,
+    handle: jlong,
+    max: jint,
+) -> jstring {
+    let text = guard("takeOutput", String::new(), || {
+        let Some(m) = machine_of(handle) else { return String::new(); };
+        match m.session.take_output(max.max(0) as usize) {
+            Ok(b) => String::from_utf8_lossy(&b).into_owned(),
+            Err(e) => { set_err(format!("takeOutput: {e}")); String::new() }
+        }
+    });
+    mk_string(env, &text)
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_chengyan_app_data_LinuxNative_resizeConsole(
+    _env: *mut JNIEnv,
+    _c: jclass,
+    handle: jlong,
+    row: jint,
+    col: jint,
+) -> jint {
+    guard("resizeConsole", -1, || {
+        let Some(m) = machine_of(handle) else { return -2; };
+        match m.session.resize_console(row.max(1) as u16, col.max(1) as u16) {
+            Ok(_) => 0,
+            Err(e) => { set_err(format!("resizeConsole: {e}")); -3 }
+        }
+    })
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_chengyan_app_data_LinuxNative_closeConsole(
+    _env: *mut JNIEnv,
+    _c: jclass,
+    handle: jlong,
+) {
+    guard("closeConsole", (), || {
+        if let Some(m) = machine_of(handle) { m.session.close_console(); }
+    });
+}

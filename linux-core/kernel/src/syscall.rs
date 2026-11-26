@@ -129,6 +129,14 @@ pub fn handle(p: &mut Process, regs: &mut [u64; 31]) -> Option<i64> {
                 EBADF
             } else {
                 match a0 {
+                    1 | 2 if p.tty.is_some() => {
+                        // 真终端：输出进 PTY 队列，由宿主 take_output 取走。
+                        // 不再直接写 out/err —— 那是执行器语义，不是终端。
+                        if let Ok(mut t) = p.tty.as_ref().unwrap().lock() {
+                            t.write_output(&buf);
+                        }
+                        len as i64
+                    }
                     1 => {
                         use std::io::Write;
                         let _ = p.out.write_all(&buf);
@@ -427,7 +435,54 @@ pub fn handle(p: &mut Process, regs: &mut [u64; 31]) -> Option<i64> {
         24 => { // dup3(old, new, flags)：flags 只允许 O_CLOEXEC，忽略
             if a0 == a1 { -22 } else { p.dup_to(a0 as i64, a1 as i64) }
         }
-        SYS_IOCTL => -25, // ENOTTY：无 tty，printf/isatty 路径需要
+        SYS_IOCTL => {
+            // a0=fd, a1=request, a2=argp
+            // 有 tty 时 isatty()/stty/终端程序必须拿到真结果；无 tty 保持 ENOTTY。
+            const TCGETS: u64 = 0x5401;
+            const TCSETS: u64 = 0x5402;
+            const TIOCGWINSZ: u64 = 0x5413;
+            const TIOCSWINSZ: u64 = 0x5414;
+            const ENOTTY_E: i64 = -25;
+            let r = (|| -> Option<i64> {
+                let tty = p.tty.as_ref()?;
+                let mut t = tty.lock().ok()?;
+                Some(match a1 {
+                    TCGETS => {
+                        // aarch64 asm-generic struct termios：iflag/oflag/cflag/lflag(各 4)
+                        // + c_line(1) + c_cc[32] + ispeed/ospeed(各 4) = 56 字节。
+                        let mut b = vec![0u8; 56];
+                        b[12..16].copy_from_slice(&t.lflag.to_le_bytes());
+                        if p.mem.write(a2, &b).is_err() { return Some(-14); }
+                        0
+                    }
+                    TCSETS => {
+                        let mut b = vec![0u8; 56];
+                        if p.mem.read(a2, &mut b).is_err() { return Some(-14); }
+                        let mut v = [0u8; 4];
+                        v.copy_from_slice(&b[12..16]);
+                        t.lflag = u32::from_le_bytes(v);
+                        0
+                    }
+                    TIOCGWINSZ => {
+                        if p.mem.write(a2, &t.winsize.to_bytes()).is_err() { return Some(-14); }
+                        0
+                    }
+                    TIOCSWINSZ => {
+                        let mut b = [0u8; 8];
+                        if p.mem.read(a2, &mut b).is_err() { return Some(-14); }
+                        t.winsize = crate::tty::Winsize {
+                            row: u16::from_ne_bytes([b[0], b[1]]),
+                            col: u16::from_ne_bytes([b[2], b[3]]),
+                            xpixel: u16::from_ne_bytes([b[4], b[5]]),
+                            ypixel: u16::from_ne_bytes([b[6], b[7]]),
+                        };
+                        0
+                    }
+                    _ => ENOTTY_E,
+                })
+            })();
+            r.unwrap_or(ENOTTY_E)
+        }
         // 信号/资源桩：单进程无信号事件，一律成功（此前 ENOSYS 使 musl 初始化路径中断）
         // 信号相关的真实编号（aarch64 generic，别照 x86 记）：
         //   132 rt_sigaction / 133 rt_sigprocmask / 134 rt_sigpending /
@@ -879,6 +934,22 @@ pub fn handle(p: &mut Process, regs: &mut [u64; 31]) -> Option<i64> {
             // a0=fd, a1=buf, a2=len；fd 0 未在表中时读注入的 stdin 缓冲
             use std::io::Read;
             let len = (a2 as usize).min(1 << 20);
+            if a0 == 0 && p.tty.is_some() {
+                // 真终端：从线路规程取一行（ECHO 由 write_input 已经回显）。
+                let got = p.tty.as_ref().unwrap().lock().ok().and_then(|mut t| t.read(len));
+                match got {
+                    Some(b) => {
+                        if p.mem.write(a1, &b).is_err() {
+                            regs[0] = ((-14i128) as i64) as u64;
+                        } else {
+                            regs[0] = b.len() as u64;
+                        }
+                    }
+                    // 没有输入时真 tty 会阻塞；这里是单步执行循环，当作 EOF。
+                    None => regs[0] = 0,
+                }
+                return None;
+            }
             if a0 == 0 && !p.files.contains_key(&0) {
                 use std::io::Seek;
                 let mut buf = vec![0u8; len];
@@ -1287,6 +1358,7 @@ mod tests {
                 out: Box::new(Vec::new()),
                 err: Box::new(Vec::new()),
                 stdin: std::io::Cursor::new(Vec::new()),
+                tty: None,
             }
         }
     }

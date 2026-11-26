@@ -60,4 +60,17 @@ internal object LinuxNative {
      * panic 位置、`[ch-native]` 诊断全在里面。
      */
     external fun logTail(max: Int): String?
+
+    // ---- 真终端：PTY 主端协议（宿主只喂字节 / 取输出）----
+    /** 打开 console，返回 id（负数为失败）。 */
+    external fun openConsole(machine: Long, row: Int, col: Int): Long
+
+    /** 往主端喂字节；返回线路规程产生的信号号之和（2=SIGINT）。 */
+    external fun feed(machine: Long, data: String): Int
+
+    /** 取 guest 输出（含 ECHO）；没有输出时为空串。 */
+    external fun takeOutput(machine: Long, max: Int): String?
+
+    external fun resizeConsole(machine: Long, row: Int, col: Int): Int
+    external fun closeConsole(machine: Long)
 }
