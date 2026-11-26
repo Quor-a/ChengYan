@@ -39,6 +39,7 @@ fn main() {
         ch_host::native::tier1_hits(),
         ch_host::native::tier1_fallbacks()
     );
+    eprintln!("[ch-dyn loads={}]", ch_kernel::dyn_loads());
     // 未实现 syscall 报表：VM 矩阵里这一行就是「内核还缺什么」的直接证据，
     // 在真机上同样的数字由 `linux info` / 终端「自检」给出。
     let ui = ch_kernel::syscall::unimplemented_report();

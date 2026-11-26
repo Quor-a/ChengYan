@@ -445,13 +445,14 @@ pub extern "system" fn Java_com_chengyan_app_data_LinuxNative_info(
         // pie=1 表示走 static PIE（arena 由内核挑）；pie=0 且 arena=0 表示回落 flat 解释器。
         let (arena, pie) = ch_kernel::last_arena();
         format!(
-            "abi={} arena={:#x} pie={} tier1={} fallback={} machines={} v={}
+            "abi={} arena={:#x} pie={} tier1={} fallback={} dyn={} machines={} v={}
 unimpl_total={} unimpl={}",
             std::env::consts::ARCH,
             arena,
             if pie { 1 } else { 0 },
             ch_host::native::tier1_hits(),
             ch_host::native::tier1_fallbacks(),
+            ch_kernel::dyn_loads(),
             live,
             env!("CARGO_PKG_VERSION"),
             ch_kernel::syscall::unimplemented_total(),

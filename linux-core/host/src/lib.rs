@@ -144,9 +144,24 @@ pub struct ExecResult {
     pub truncated: bool,
 }
 
+/// 解析出来的一次执行：程序字节 + 解释器字节 + 真正的 argv。
+struct RunSpec {
+    /// 实际装进 arena 的程序字节。
+    bytes: Vec<u8>,
+    /// 动态链接解释器字节（`PT_INTERP` 指向的文件）。`None` = 静态程序。
+    interp: Option<Vec<u8>>,
+    /// 交给 guest 的 argv（`argv[0]` 保持用户输入的原样，哪怕实际执行的是
+    /// `/bin/ls` —— 与 ash 的 exec 语义一致）。
+    argv: Vec<String>,
+    /// guest 视角的程序路径（诊断用；空 = 回落到会话自带的 busybox）。
+    prog: String,
+}
+
 /// 会话：绑一份 busybox（多调用二进制）与 jailed rootfs。
 pub struct Session {
     pub busybox_bytes: Vec<u8>,
+    /// busybox 在 jail 里的路径（PATH 解析的首选落点）。
+    pub busybox_path: String,
     pub root: PathBuf,
     /// guest 视角的当前目录（虚拟绝对路径，如 "/"、"/tmp"）
     pub cwd: Mutex<String>,
@@ -154,6 +169,10 @@ pub struct Session {
     pub env: Mutex<BTreeMap<String, String>>,
     /// 上一条命令的退出码（$?）
     pub last_status: AtomicI32,
+    /// 程序字节缓存：key = 宿主绝对路径，value = (大小, 字节)。
+    /// 每条命令都要读一次 ELF（PIE 之后每次都要重新装载），不做缓存的话
+    /// busybox 那 1.1MB 每条命令都要从闪存/页缓存里再拷一遍。
+    prog_cache: Mutex<BTreeMap<String, (u64, Arc<Vec<u8>>)>>,
 }
 
 impl Session {
@@ -175,10 +194,12 @@ impl Session {
         env.insert("HOSTNAME".into(), "chengyan".into());
         Ok(Self {
             busybox_bytes: std::fs::read(busybox_path).map_err(|e| format!("read busybox: {e}"))?,
+            busybox_path: busybox_path.to_string_lossy().into_owned(),
             root: root.to_path_buf(),
             cwd: Mutex::new("/".to_string()),
             env: Mutex::new(env),
             last_status: AtomicI32::new(0),
+            prog_cache: Mutex::new(BTreeMap::new()),
         })
     }
 
@@ -224,9 +245,164 @@ impl Session {
             if !f.exists() { let _ = std::fs::write(f, content); }
         };
         w("version", "Linux version 4.19.0-ch (usermode; no kernel; Alpine 3.20.3 minirootfs)\n".into());
+        // /proc/mounts：`df` / `mount` / `apk` 都会读它。缺这个文件时 busybox 的 df
+        // 只打一句 "can't find mount point"，用户看到的就是「df 坏了」。
+        w("mounts", "/dev/root / rootfs rw,relatime 0 0\nproc /proc proc rw,nosuid,nodev,noexec,relatime 0 0\ntmpfs /dev tmpfs rw,nosuid,relatime 0 0\n".into());
         w("cpuinfo", "processor\t: 0\nHardware\t: ch-engine usermode aarch64\nFeatures\t: fp asimd\n".into());
         w("meminfo", concat!(
 "MemTotal:         131072 kB\nMemFree:           98304 kB\nMemAvailable:     114688 kB\nBuffers:            2048 kB\nCached:            14336 kB\nSwapCached:            0 kB\nActive:            20480 kB\nInactive:           8192 kB\nActive(anon):       8192 kB\nInactive(anon):        0 kB\nActive(file):      12288 kB\nInactive(file):     8192 kB\nUnevictable:            0 kB\nMlocked:                0 kB\nSwapTotal:              0 kB\nSwapFree:               0 kB\nDirty:                  0 kB\nWriteback:              0 kB\nAnonPages:          8192 kB\nMapped:             4096 kB\nShmem:                  0 kB\nSlab:               2048 kB\nSReclaimable:        1024 kB\nSUnreclaim:          1024 kB\nKernelStack:          64 kB\nPageTables:           128 kB\nCommitLimit:       65536 kB\nCommitted_AS:      20480 kB\nVmallocTotal: 262143996 kB\nVmallocUsed:            0 kB\nVmallocChunk:           0 kB\nHugePages_Total:       0\nHugePages_Free:        0\nHugePages_Rsvd:        0\nHugePages_Surp:        0\nHugepagesize:       2048 kB\n").into());
+    }
+
+    /// 读一个 guest 路径的程序字节（带回大小校验的缓存）。
+    fn prog_bytes(&self, host: &std::path::Path) -> Option<Arc<Vec<u8>>> {
+        let key = host.to_string_lossy().into_owned();
+        let meta = std::fs::metadata(host).ok()?;
+        if !meta.is_file() {
+            return None;
+        }
+        let size = meta.len();
+        if let Some((sz, b)) = self.prog_cache.lock().ok()?.get(&key) {
+            if *sz == size {
+                return Some(b.clone());
+            }
+        }
+        // 8MB 上限：真机上一条命令读几十 MB 等于让 UI 卡死，直接判不可执行。
+        if size > 8 * 1024 * 1024 {
+            return None;
+        }
+        let b = Arc::new(std::fs::read(host).ok()?);
+        let mut g = self.prog_cache.lock().ok()?;
+        if g.len() > 8 {
+            g.clear();
+        }
+        g.insert(key, (size, b.clone()));
+        Some(b)
+    }
+
+    /// 把用户敲的命令解析成「要装哪个程序 + 它的解释器」。
+    ///
+    /// 这是本轮修掉的**最大一个坑**：以前不管敲什么都只跑会话自带的那一份
+    /// busybox（`busybox <命令> <参数>`），于是 rootfs 里 500 多个文件、`/sbin/apk.static`
+    /// 以及任何 `apk add` 装进来的程序**全都跑不了**，终端只是个「busybox applet 播放器」。
+    ///
+    /// 现在的规则与 ash 一致：
+    /// 1. `argv[0]` 带 `/` → 按路径（相对 cwd）；
+    /// 2. 否则按 `PATH` 逐个目录找可执行文件；
+    /// 3. 找到的是 ELF → 装它（有 `PT_INTERP` 就连解释器一起装）；
+    /// 4. 找到的是脚本（`#!`）→ 交给 busybox sh 跑；
+    /// 5. 一个都没找到 → 回落 busybox applet（老行为，报错信息也保持原样）。
+    fn resolve_prog(&self, argv: &[String], cwd: &str) -> RunSpec {
+        let name = argv.first().cloned().unwrap_or_default();
+        let bb = |argv: Vec<String>| RunSpec {
+            bytes: self.busybox_bytes.clone(),
+            interp: None,
+            argv,
+            prog: String::new(),
+        };
+        if name.is_empty() {
+            return bb(argv.to_vec());
+        }
+        // 候选 guest 路径
+        let mut cands: Vec<String> = Vec::new();
+        if name.contains('/') {
+            cands.push(self.virt_path_at(cwd, &name));
+        } else {
+            let path = self
+                .env
+                .lock()
+                .ok()
+                .and_then(|e| e.get("PATH").cloned())
+                .unwrap_or_else(|| "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".into());
+            for d in path.split(':').filter(|d| !d.is_empty()) {
+                cands.push(format!("{}/{}", d.trim_end_matches('/'), name));
+            }
+        }
+        for cand in cands {
+            let dbg = std::env::var("CH_EXEC_DEBUG").is_ok();
+            let Some(host) = self.resolve_host(cwd, &cand) else {
+                if dbg {
+                    eprintln!("[ch-exec] 候选越狱/软链环: {cand}");
+                }
+                continue;
+            };
+            let Some(bytes) = self.prog_bytes(&host) else {
+                if dbg {
+                    eprintln!("[ch-exec] 候选不可执行: {cand} → {}", host.display());
+                }
+                continue;
+            };
+            if bytes.len() >= 2 && &bytes[0..2] == b"#!" {
+                // 脚本：`busybox sh <脚本> <参数...>`（与内核 shebang 语义等价）
+                let mut a: Vec<String> = vec!["sh".into(), cand.clone()];
+                a.extend(argv.iter().skip(1).cloned());
+                return RunSpec {
+                    bytes: self.busybox_bytes.clone(),
+                    interp: None,
+                    argv: {
+                        let mut v = vec!["busybox".to_string()];
+                        v.extend(a);
+                        v
+                    },
+                    prog: cand,
+                };
+            }
+            if bytes.len() < 4 || &bytes[0..4] != b"\x7fELF" {
+                continue;
+            }
+            // 动态链接：解释器路径是 guest 绝对路径，必须能在 jail 里读到
+            let interp = ch_kernel::elf::interp_path(&bytes).and_then(|ip| {
+                let ih = self.resolve_host("/", &ip)?;
+                self.prog_bytes(&ih).map(|b| (*b).clone())
+            });
+            if std::env::var("CH_EXEC_DEBUG").is_ok() {
+                eprintln!(
+                    "[ch-exec] 命中 {cand} → {}（{} 字节）interp={:?} {}",
+                    host.display(),
+                    bytes.len(),
+                    ch_kernel::elf::interp_path(&bytes),
+                    if interp.is_some() { "已载入" } else { "无/缺失" }
+                );
+            }
+            return RunSpec {
+                bytes: (*bytes).clone(),
+                interp,
+                argv: argv.to_vec(),
+                prog: cand,
+            };
+        }
+        // 一个候选都没有：回落 busybox applet（`busybox <命令> ...`）
+        if std::env::var("CH_EXEC_DEBUG").is_ok() {
+            eprintln!("[ch-exec] 未命中任何候选，回落 busybox applet：{name}");
+        }
+        let mut a = vec!["busybox".to_string()];
+        a.extend(argv.iter().cloned());
+        bb(a)
+    }
+
+    /// 相对 guest 虚拟 cwd 解析绝对虚拟路径（不做软链跟随，交给内核 openat 那套）。
+    pub fn virt_path_at(&self, cwd: &str, raw: &str) -> String {
+        ch_kernel::path::to_virt(&ch_kernel::path::virt_components(
+            &ch_kernel::path::split_abs(cwd),
+            raw,
+        ))
+    }
+
+    /// 虚拟 cwd + 路径 → 宿主路径。
+    pub fn host_path_at(&self, cwd: &str, raw: &str) -> PathBuf {
+        let comps = ch_kernel::path::virt_components(&ch_kernel::path::split_abs(cwd), raw);
+        ch_kernel::path::join_root(&self.root, &comps)
+    }
+
+    /// 虚拟 cwd + 路径 → **jail 内跟随过软链的**宿主路径。
+    ///
+    /// 必须用这个来定位可执行文件，不能直接用 [`Session::host_path_at`]：
+    /// Alpine 的 `/bin/ls` 是 `-> /bin/busybox` 这样的**绝对**软链，宿主直接
+    /// `metadata()` 会去解析宿主自己根下的 `/bin/busybox`（Android 上不存在、
+    /// 桌面上是另一个程序），于是所有 applet 都被判「不可执行」、全部回落到
+    /// `busybox <applet>` —— 真机上就是「rootfs 里 500 个文件一个都跑不了」。
+    pub fn resolve_host(&self, cwd: &str, raw: &str) -> Option<PathBuf> {
+        let comps = ch_kernel::path::virt_components(&ch_kernel::path::split_abs(cwd), raw);
+        ch_kernel::path::resolve_following(&self.root, &comps, true)
     }
 
     /// 内部：跑一条 argv，stdout/stderr 分别落到调用方给的 writer，并注入 stdin。
@@ -240,9 +416,15 @@ impl Session {
         cap: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     ) -> Result<i32, String> {
         self.ensure_proc();
-        let mut proc = Process::new(&self.busybox_bytes)?;
+        let spec = self.resolve_prog(argv, cwd);
+        let mut proc = if let Some(ib) = spec.interp.as_deref() {
+            Process::new_ex(&spec.bytes, Some(ib), 0)?
+        } else {
+            Process::new(&spec.bytes)?
+        };
         proc.root = self.root.clone();
         proc.cwd = cwd.to_string();
+        proc.prog = spec.prog.clone();
         proc.out = out;
         proc.err = err;
         proc.out_cap = cap;
@@ -254,94 +436,9 @@ impl Session {
         let tls_base = proc.image.stack_top - 0x2_0000;
         cpu.tpidr = tls_base + 0x8000;
 
-        // 初始栈：argc/argv/NULL/envp/auxv（与 runner 同源，紧凑排布）
-        cpu.sp = proc.image.stack_top - 0x1000;
-        let mut str_base = cpu.sp + 0x900; // 字符串区放 sp 上方：musl/ash 栈帧向下增长，sp-0x1000 会被深栈踩掉
-        let mut argv_ptrs: Vec<u64> = Vec::new();
-        for a in argv {
-            let b = a.as_bytes();
-            let _ = proc.mem.write(str_base, b);
-            let _ = proc.mem.write(str_base + b.len() as u64, &[0u8]);
-            argv_ptrs.push(str_base);
-            str_base += b.len() as u64 + 1;
-        }
-        let argc = argv_ptrs.len() as u64;
-        let _ = proc.mem.write(cpu.sp, &argc.to_le_bytes());
-        for (i, ptr) in argv_ptrs.iter().enumerate() {
-            let _ = proc.mem.write(cpu.sp + 8 + 8 * i as u64, &ptr.to_le_bytes());
-        }
-
-        // envp：必须在 argv 的 NULL 之后、auxv 之前。缺 envp 会让 getenv("PATH") 全空，
-        // busybox 找不到 applet、脚本解释器与 locale 全部退化。
-        let mut env_ptrs: Vec<u64> = Vec::new();
-        for (k, v) in self.env_snapshot() {
-            let s = format!("{k}={v}");
-            let b = s.as_bytes();
-            let _ = proc.mem.write(str_base, b);
-            let _ = proc.mem.write(str_base + b.len() as u64, &[0u8]);
-            env_ptrs.push(str_base);
-            str_base += b.len() as u64 + 1;
-        }
-
-        let mut off = cpu.sp + 8 + 8 * argv_ptrs.len() as u64;
-        let rand_bytes: [u8; 16] = [0x5a; 16];
-        let _ = proc.mem.write(str_base + 0x200, &rand_bytes);
-        let _ = proc.mem.write(off, &0u64.to_le_bytes()); off += 8; // argv NULL
-        for ptr in &env_ptrs {
-            let _ = proc.mem.write(off, &ptr.to_le_bytes()); off += 8;
-        }
-        let _ = proc.mem.write(off, &0u64.to_le_bytes()); off += 8; // envp NULL
-
-        // auxv：与 qemu-aarch64 提供集对齐（musl __init_libc 全量扫描）
-        let bytes = &self.busybox_bytes;
-        let (e_phoff, e_phentsize, e_phnum) = {
-            let phoff = u64::from_le_bytes(bytes[0x20..0x28].to_vec().try_into().unwrap());
-            let phent = u16::from_le_bytes(bytes[0x36..0x38].to_vec().try_into().unwrap()) as u64;
-            let phnum = u16::from_le_bytes(bytes[0x38..0x3a].to_vec().try_into().unwrap()) as u64;
-            (phoff, phent, phnum)
-        };
-        let load_vaddr = {
-            let mut lv = 0u64;
-            for k in 0..e_phnum as usize {
-                let ph = 0x40 + e_phentsize * k as u64;
-                let p = &bytes[ph as usize..(ph + 32) as usize];
-                if u32::from_le_bytes(p[0..4].try_into().unwrap()) == 1 {
-                    lv = u64::from_le_bytes(p[16..24].try_into().unwrap()); break;
-                }
-            }
-            lv
-        };
-        // 注意：33 = AT_SYSINFO_EHDR（vDSO 基址），不是 AT_MINSIGSTKSZ(=51)。
-        // 旧版把 33 填成 5120(0x1400)，musl 的 __vdsosym 会把 0x1400 当 ELF 头解析、
-        // 符号表全是垃圾 → 野指针 / mallocng 元数据崩坏（runner 侧已踩过，host 侧漏修）。
-        // AT_MINSIGSTKSZ(51) 填 5120 才是正确项。
-        let aux: [(u64, u64); 21] = [
-            (3, proc.image.phdr),            // AT_PHDR（PIE 下必须带加载偏移）
-            (4, e_phentsize),                 // AT_PHENT
-            (5, e_phnum),                     // AT_PHNUM
-            (6, 4096),                        // AT_PAGESZ
-            (7, 0),                           // AT_BASE
-            (8, 0),                           // AT_FLAGS
-            (9, proc.image.entry),            // AT_ENTRY
-            (11, 0), (12, 0), (13, 0), (14, 0), // uid/euid/gid/egid
-            (16, 0xefff_fffb),                // AT_HWCAP
-            (17, 100),                        // AT_CLKTCK
-            (25, str_base + 0x200),           // AT_RANDOM（16 字节 0x5a）
-            (23, 0),                          // AT_SECURE
-            (31, str_base + 0x100),           // AT_EXECFN
-            (26, 0x1800_7fc7_7fff),           // AT_HWCAP2
-            (15, str_base + 0x40),            // AT_PLATFORM
-            (33, 0),                          // AT_SYSINFO_EHDR：无 vDSO，必须 0
-            (51, 5120),                       // AT_MINSIGSTKSZ
-            (0, 0),                           // AT_NULL
-        ];
-        for (k, v) in aux {
-            let _ = proc.mem.write(off, &k.to_le_bytes()); off += 8;
-            let _ = proc.mem.write(off, &v.to_le_bytes()); off += 8;
-        }
-        let _ = proc.mem.write(str_base + 0x40, b"aarch64\0"); // AT_PLATFORM
-        let execfn = format!("{}\0", argv.first().map(|s| s.as_str()).unwrap_or("busybox"));
-        let _ = proc.mem.write(str_base + 0x100, execfn.as_bytes()); // AT_EXECFN
+        // 初始栈：argc/argv/NULL/envp/auxv（内核统一组装，含动态链接的 AT_BASE）
+        let env: Vec<(String, String)> = self.env_snapshot();
+        cpu.sp = ch_kernel::setup_stack(&mut proc, &spec.argv, &env)?;
 
         // ---- Tier1：把 guest 代码交给真 CPU ----
         // 宿主与 guest 同为 aarch64、且内存是恒等映射时，解释器没有必要存在：

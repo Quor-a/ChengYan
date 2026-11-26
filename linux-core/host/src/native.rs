@@ -485,16 +485,27 @@ pub fn run(proc: &mut Process, sp: u64) -> Result<i32, String> {
     let guard = BusyGuard;
 
     // 1) 先扫出所有 svc 站点。扫不到就说明这条二进制不靠 svc 进内核（可能被
-    //    ptrace/seccomp 改过，或是动态链接的），直接放弃，别把代码改坏。
-    let (t0, t1) = proc.image.text;
+    //    ptrace/seccomp 改过），直接放弃，别把代码改坏。
+    //
+    // **动态链接时必须扫两个镜像**：起点是解释器（ld-musl）的入口，真正的 syscall
+    // 指令全在解释器自己的代码里；主程序的 .text 可能一条 svc 都没有。旧实现只扫
+    // `image.text`（主程序那一段）→ 动态程序一律「可执行段里没有 svc #0」→ 无声
+    // 回落 Tier0。`xranges` 是主程序 + 解释器所有可执行段的并集。
+    let ranges = if proc.image.xranges.is_empty() {
+        vec![proc.image.text]
+    } else {
+        proc.image.xranges.clone()
+    };
     let mut sites: Vec<u64> = Vec::new();
-    let mut a = t0 & !3;
-    while a + 4 <= t1 {
-        let mut b = [0u8; 4];
-        if proc.mem.read(a, &mut b).is_ok() && u32::from_le_bytes(b) == SVC0 {
-            sites.push(a);
+    for (t0, t1) in &ranges {
+        let mut a = t0 & !3;
+        while a + 4 <= *t1 {
+            let mut b = [0u8; 4];
+            if proc.mem.read(a, &mut b).is_ok() && u32::from_le_bytes(b) == SVC0 {
+                sites.push(a);
+            }
+            a += 4;
         }
-        a += 4;
     }
     if sites.is_empty() {
         return Err("可执行段里没有 svc #0".into());
@@ -506,41 +517,53 @@ pub fn run(proc: &mut Process, sp: u64) -> Result<i32, String> {
     // 3) 代码页必须显式带上 X：恒等映射申请的是 RW，不带 PROT_EXEC 就是 NX，
     //    跳进入口立刻 fault。Android 上这一步会走 execmem 检查，被拒绝时
     //    mprotect 直接失败 —— 正好在「一条指令都没执行」时退出去。
+    //
+    //    权限按 ELF 段**逐页归并**（`image.prots`）：旧实现假设「只有一段代码 +
+    //    一段数据」，动态链接之后是两个镜像七八个段，那个假设不成立了。
     const PAGE: u64 = 4096;
     const PROT_RX: i32 = 1 | 4;
     const PROT_RWX: i32 = 1 | 2 | 4;
-    let rx_lo = t0 & !(PAGE - 1);
-    let text_hi = (t1 + PAGE - 1) & !(PAGE - 1);
-    let mut rx_hi = text_hi;
-    let mut prot = PROT_RX;
-    if proc.image.wseg != 0 {
-        let wp = proc.image.wseg & !(PAGE - 1);
-        if wp == text_hi {
-            // 代码尾页与可写段共页：不能整页砍掉 X，否则 guest 一写 .data
-            // 就段错误；也不能整页砍掉 W，否则 .data 写不进去。保留 RWX。
-            prot = PROT_RWX;
-        } else if wp < text_hi {
-            rx_hi = wp;
+    let mut applied: Vec<(u64, u64, i32)> = Vec::new();
+    for &(lo, hi, p) in &proc.image.prots {
+        if p == 0 {
+            continue;
         }
+        let prot = match p {
+            7 => PROT_RWX,
+            5 => PROT_RX,
+            // 纯 R / RW 不需要动：arena 本来就是 RW
+            _ => continue,
+        };
+        let lo = lo & !(PAGE - 1);
+        let hi = (hi + PAGE - 1) & !(PAGE - 1);
+        if hi <= lo {
+            continue;
+        }
+        applied.push((lo, hi, prot));
     }
-    if rx_hi <= rx_lo {
-        return Err("代码段区间异常".into());
+    if applied.is_empty() {
+        return Err("没有任何可执行段（prots 为空）".into());
     }
 
     // 4) 改写 svc → brk #0
     for &s in &sites {
         proc.mem.write(s, &BRK0.to_le_bytes())?;
     }
+    let (t0, t1) = ranges
+        .iter()
+        .fold((u64::MAX, 0u64), |a, r| (a.0.min(r.0), a.1.max(r.1)));
     unsafe { flush_icache(t0, t1) };
 
     // 5) 设权限。失败要先把代码还原，好让调用方干净地回落到解释器
     //    —— 否则解释器看到的是 brk，一条 syscall 都进不去。
-    if let Err(e) = proc.mem.protect(rx_lo, rx_hi - rx_lo, prot) {
-        for &s in &sites {
-            let _ = proc.mem.write(s, &SVC0.to_le_bytes());
+    for &(lo, hi, prot) in &applied {
+        if let Err(e) = proc.mem.protect(lo, hi - lo, prot) {
+            for &s in &sites {
+                let _ = proc.mem.write(s, &SVC0.to_le_bytes());
+            }
+            unsafe { flush_icache(t0, t1) };
+            return Err(format!("代码页设 R-X 失败（Android execmem？）：{e}"));
         }
-        unsafe { flush_icache(t0, t1) };
-        return Err(format!("代码页设 R-X 失败（Android execmem？）：{e}"));
     }
 
     // 4) 起跑
@@ -556,8 +579,8 @@ pub fn run(proc: &mut Process, sp: u64) -> Result<i32, String> {
     let entry = proc.image.entry;
     if std::env::var("CH_NATIVE_DEBUG").is_ok() {
         eprintln!(
-            "[ch-native] text={:#x}..{:#x} sites={} entry={:#x} sp={:#x} prot={:#x}",
-            t0, t1, sites.len(), entry, sp, prot as u32
+            "[ch-native] ranges={} sites={} entry={:#x} sp={:#x} interp={:#x} prots={}",
+            ranges.len(), sites.len(), entry, sp, proc.image.interp_base, applied.len()
         );
     }
     TIER1_HITS.fetch_add(1, Ordering::Relaxed);

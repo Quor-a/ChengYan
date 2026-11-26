@@ -169,7 +169,7 @@ fn main() {
     loop {
         let mut km = KernelMem(&mut proc);
         if std::env::var("CH_TRACE").is_ok() {
-            eprintln!("pc={:#06x} sp={:#x} x0={:#x} x1={:#x} x2={:#x} x3={:#x} x4={:#x} x5={:#x} x6={:#x} x7={:#x} x8={:#x} x9={:#x} x19={:#x} x30={:#x} x20={:#x} x21={:#x} x22={:#x} x23={:#x} x24={:#x} x25={:#x} x26={:#x} x27={:#x} x28={:#x} x29={:#x}", cpu.pc, cpu.sp, cpu.x[0], cpu.x[1], cpu.x[2], cpu.x[3], cpu.x[4], cpu.x[5], cpu.x[8], cpu.x[9], cpu.x[19], cpu.x[30], cpu.x[20], cpu.x[21], cpu.x[22], cpu.x[23], cpu.x[24], cpu.x[25], cpu.x[26], cpu.x[27], cpu.x[28], cpu.x[29]);
+            eprintln!("pc={:#06x} sp={:#x} x0={:#x} x1={:#x} x2={:#x} x3={:#x} x4={:#x} x5={:#x} x6={:#x} x7={:#x} x8={:#x} x9={:#x} x19={:#x} x30={:#x} x20={:#x} x21={:#x} x22={:#x} x23={:#x} x24={:#x} x25={:#x} x26={:#x} x27={:#x} x28={:#x} x29={:#x}", cpu.pc, cpu.sp, cpu.x[0], cpu.x[1], cpu.x[2], cpu.x[3], cpu.x[4], cpu.x[5], cpu.x[6], cpu.x[7], cpu.x[8], cpu.x[9], cpu.x[19], cpu.x[30], cpu.x[20], cpu.x[21], cpu.x[22], cpu.x[23], cpu.x[24], cpu.x[25], cpu.x[26], cpu.x[27], cpu.x[28], cpu.x[29]);
         }
         if pctwatch.contains(&cpu.pc) {
             let regs: Vec<String> = (0..31).map(|k| format!("x{k}={:#x}", cpu.x[k])).collect();

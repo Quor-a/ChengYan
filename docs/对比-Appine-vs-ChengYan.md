@@ -162,8 +162,11 @@ ChengYan 是**「宿主侧 shell + 单进程 aarch64 解释器」**：它把 bus
 glob（`* ? []`）、`cd/pwd/export/unset`、`cp/mv` 跨目录、越狱防护。
 
 不能：`$(...)`、`for/while/if`、函数、真后台 `&`、`vi/less/top`（无 tty）、
-`^C` 中断、动态链接程序、`apk add`（无包管理器 + 无动态链接器）、
+`^C` 中断、`apk add` / 包安装（未验证：需要脚本执行、chown、硬链接等链路）、
 guest 内部 fork/exec（`sh script.sh` 里 applet 自己 exec 会断）。
+
+动态链接已于 v1.9.12 打通（见 §14）：`apk --version/info/list/policy/version` 全部可跑，
+包括递归加载 4 个 `DT_NEEDED` 共享库（libcrypto 4.6MB）。
 
 ---
 
@@ -231,3 +234,80 @@ busybox 取自 Alpine 1.37.0-r31 官方 `busybox-static`（未改一个字节，
 2. **动态链接**（`PT_INTERP` + RELATIVE/GLOB_DAT/JUMP_SLOT）：才能跑 Alpine 常规动态 PIE（`apk` 等）
 3. **真 PTY**：依赖 1；有它才有 `^C`(SIGINT)、`isatty()`、`vi/less/top`
 4. **真 DBT**：当前 Tier1 是「svc 改 brk + 信号回调」，功能等价但每条 syscall 两次态切换
+
+---
+
+## 14. 动态链接落地：PT_INTERP + 共享库 + 真 exec（v1.9.12）
+
+上一节的第 2 项本轮完成。这条线是「只能跑 busybox applet」与「整个 Alpine 用户空间能跑」
+之间那道门：rootfs 里 500+ 文件此前绝大多数起不来。
+
+### 14.1 内核侧
+
+| 改动 | 为什么必须 |
+|---|---|
+| `elf.rs::interp_path()` + `load_with_interp()` | 主程序 `ET_DYN` 带 `PT_INTERP=/lib/ld-musl-aarch64.so.1`：两个 ELF 平铺进同一个 arena（主程序低地址、解释器紧随其后 64KB 对齐），起点切到解释器入口，auxv 传 `AT_BASE`/`AT_PHDR`/`AT_ENTRY`/`AT_PHENT`/`AT_PHNUM` |
+| `AT_PHDR = bias + e_phoff`（`bias = min(vaddr - offset)` per PT_LOAD） | 旧代码直接 `e_phoff + base`：static PIE（lo=0）碰巧对，跑 ET_EXEC 的 `apk.static`（落点 0x400000、phoff=0x40）算出 `0x40` → musl 拿 `0x40` 当程序头 → `fault=0x40` SIGSEGV |
+| `page_prots()` 逐页归并 PF_W/PF_X | 双镜像后是「主程序 3~4 段 + 解释器 3~4 段」，旧的手写「代码尾页与数据首段共页就 RWX」假设失效 |
+| `mmap(fd>=0)` 文件映射：按 `[off, off+len)` 读进 arena；加 X 时真 `mprotect(RWX)` | musl 不用「读文件再写内存」：`mmap(NULL,PROT_NONE,ANON|NORESERVE)` 先占地址，再对每段 `mmap(base+off,len,prot,MAP_FIXED\|MAP_PRIVATE,fd,file_off)`。没有文件映射，动态库一个都进不来 |
+| `mem.span()` 取真实上界 | `arena + MEM_SIZE` 在 ET_EXEC 下比 backing 长（backing 只有 `MEM_SIZE - low`），越界读 `0x43ef900+16` |
+| Tier1 扫 `image.xranges`（主程序 **+ 解释器**所有可执行段） | svc 指令全在解释器代码里；只扫 `image.text` ⇒ 动态程序一律静默回落 Tier0 |
+| `close_fd` dup 别名升格 + 所有 fd 查表走 `real_fd()` | busybox ash 的 `open_script` 是 `open → fcntl(F_DUPFD,10) → close 原位`。关原件把副本一起弄死 ⇒ 脚本被当空文件、退出码 0 且零输出（极隐蔽） |
+| 新增 `readlinkat(78)`、`fchmod/fchmodat(52/53)`、`statfs/fstatfs(43/44)`、`madvise(233)`；aarch64 信号号按 generic 表重排 | `ls -l`、`chmod +x 脚本`、`df /`、`apk` 分别需要；`135` 被误当 rt_sigprocmask 会让 apk 直接挂 |
+
+### 14.2 真 exec：按 PATH / shebang / PT_INTERP 分流
+
+`host/src/lib.rs` 新增 `resolve_prog()`：带 `/` 走路径、否则按 PATH 逐个试；`#!` 脚本转成
+`busybox sh <脚本>`；ELF 装它（有 `PT_INTERP` 就连解释器一起装）；都不是才回落 `busybox <applet>`。
+`resolve_host()` 在 jail 内跟随软链（Alpine 的 `/bin/ls -> /bin/busybox` 是**绝对**软链，
+宿主 `metadata()` 会去解析宿主自己的 `/bin/busybox`）。
+
+### 14.3 真正难的一个 bug：fd 0/1/2 与 musl `map_library()`
+
+`apk.static`（静态）能跑，但 `/sbin/apk`（动态）打 **107 条 `symbol not found`**
+（`apk_db_*`、`fetchConnectionCacheInit`、`uncompress` 等）后 exit 127。`CH_MMAP_DEBUG=1`
+细粒度日志给出的决定性证据：
+
+```
+[ch-open] /lib/libcrypto.so.3 -> fd=0     ← 只有第一个 DT_NEEDED 成功 mmap
+[ch-mmap] addr=0 len=0x466000 fd=0 ... got=4597896
+[ch-open] /lib/libz.so.1                 ← 打开了，之后一个 mmap 都没有
+[ch-open] /lib/libapk.so.2.14.0          ← 同上
+Error relocating /sbin/apk: ...: symbol not found   （×107）
+```
+
+根因链：`openat` 用 `while files.contains_key(fd)` 从 **0** 找空位 ⇒ 第一个库拿 fd 0、
+第二个 fd 1、第三个 fd 2；而 `fstat(1)/fstat(2)` 走的是「stdio 字符设备 stub、
+`st_size=0`」分支（本来是给 busybox `sort` 判断 stdout 用的）；
+musl 的 `map_library()` 一见 `st_size==0` 就 EINVAL 放弃，库压根没被映进地址空间，
+随后所有符号查找必然失败。musl 的加载失败提示在这里也不打印，所以表面上只看到 107 条
+重定位错误 —— 从错误表象完全反推不到 fd 分配。
+
+修法三处（互为补充）：
+1. `openat` 改用 `p.alloc_fd(0)`：0/1/2 是终端注入的 stdin/out/err，恒视为已占用，新文件从 **3** 起（Linux `alloc_fd` 语义）。
+2. `fstat(0/1/2)` 先看 `p.files` 是否真接了文件；接了就报真实 metadata，只有没接才用 stub。
+3. `close(0/1/2)` 不再只摘别名——必须真的 `close_fd()`，否则 musl 关库文件时 fd 表一路泄漏。
+
+修完同一条命令直接输出 `apk-tools 2.14.4, compiled for aarch64.`，
+4 个共享库（libcrypto 4.6MB / libz / libapk / libssl）递归加载、符号解析、GOT 重定位、
+malloc 堆扩张全部走通。
+
+### 14.4 验证
+
+- **aarch64 VM（qemu + Alpine 真内核）66 项矩阵**：**65 × exit 0 + 2 × 故意负例 exit 1**，
+  `[ch-unimpl]` **0 次**，无 panic / 越界；每一例 `fallback=0`，`[ch-dyn loads]` 在动态项为 1/2/3。
+- 新增 apk 实测：`--version` 2.14.4、`info` 16 个包、`list --installed`、
+  `policy musl`（真读 `/lib/apk/db/installed` 包库）、`info -v musl`、`--help`、与静态 busybox 混合管道。
+- 单测：`cargo test -p ch-kernel -p ch-engine -p ch-runner` → **18 passed / 0 failed**。
+  新增 `alloc_fd_skips_stdio` 回归用例，把上面那条根因钉死。
+- `CH_MMAP_DEBUG=1` 作为常驻排障开关保留（默认关）：只打印 open/fstat/mmap，
+  不会像 `CH_STRACE` 那样把几万条 syscall 刷出来。
+
+### 14.5 仍然没做到（依赖顺序不变）
+
+1. **软页表**（→ 并发 guest 进程 → `clone/execve/wait4`）— 仍是第一优先级
+2. **真 PTY**（→ `^C`/`isatty`/`vi/less/top`）— 依赖 1
+3. **真 DBT** — 当前 Tier1 功能等价但每条 syscall 两次态切换
+
+`apk add` 未纳入矩阵：包安装还要走脚本执行、chown、硬链接等链路，
+在软页表/真 PTY 落地前没有验证价值。

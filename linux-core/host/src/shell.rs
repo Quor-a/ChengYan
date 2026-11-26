@@ -767,8 +767,11 @@ fn exec_pipeline(s: &Session, pl: &Pipeline, shared: &SharedOut) -> i32 {
             None => stdin.clone(),
         };
 
-        let mut argv: Vec<String> = vec!["busybox".to_string()];
-        argv.extend(c.argv.iter().cloned());
+        // 真 exec：`argv[0]` 就是用户敲的命令名，由 Session 按 PATH 在 jail 里找
+        // 真正的可执行文件（`/bin/ls`、`/sbin/apk.static`、`apk add` 装进来的任何程序）。
+        // 旧写法是 `busybox <命令> <参数>` —— 那等于把 rootfs 里 500 多个文件全部无视，
+        // 终端只能跑 busybox applet。找不到时才回落到 busybox（行为与旧版一致）。
+        let argv: Vec<String> = c.argv.iter().cloned().collect();
         let r = s.run_capture(&argv, &input, &cwd);
         let mut out = r.out;
         let mut err = r.err;

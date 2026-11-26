@@ -12,8 +12,8 @@ android {
         applicationId = "com.chengyan.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 11
-        versionName = "1.9.11"
+        versionCode = 12
+        versionName = "1.9.12"
     }
 
     signingConfigs {

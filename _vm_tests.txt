@@ -45,3 +45,22 @@ yes|wc 也被截断	yes ch | head -5 | wc -l
 重复输出不炸内存	yes abc | tail -1 | head -1
 ../.. 不出 jail	cd /; ls ../../ 2>&1 | head -3
 读宿主 /etc/shadow	cat ../../../etc/shadow 2>&1 | head -2
+环境：jail 里的动态 busybox	ls -l /opt/dyn/bin/busybox
+环境：applet 软链	ls -l /opt/dyn/bin/echo
+真 exec：apk.static 版本	/sbin/apk.static --version 2>&1 | head -3
+真 exec：apk.static info	/sbin/apk.static info 2>&1 | head -3
+真 exec：动态 apk 版本（4 个 .so）	/sbin/apk --version 2>&1
+真 exec：动态 apk info（16 包）	/sbin/apk info 2>&1 | head -5
+真 exec：动态 apk list	/sbin/apk list --installed 2>&1 | head -3
+真 exec：动态 apk policy（读包库）	/sbin/apk policy musl 2>&1 | head -3
+真 exec：动态 apk info -v	/sbin/apk info -v musl 2>&1 | head -2
+动态链接：echo	/opt/dyn/bin/echo dyn-ok
+动态链接：cat 读文件	/opt/dyn/bin/cat /etc/alpine-release
+动态链接：ls | wc	/opt/dyn/bin/ls /etc | /opt/dyn/bin/wc -l
+动态链接：三段管道	/opt/dyn/bin/grep root /etc/passwd | /opt/dyn/bin/cut -d: -f1 | /opt/dyn/bin/head -2
+动态链接：改 PATH 后走 PATH	export PATH=/opt/dyn/bin; echo path-ok
+动态链接：PATH 内的 grep	grep root /etc/passwd | head -1
+混合：静态写动态读	echo hi | /opt/dyn/bin/cat
+动态链接：applet 软链 ls -l（readlinkat）	ls -l /opt/dyn/bin/echo
+动态链接：df（statfs）	df / | head -2
+动态链接：脚本 shebang	echo '#!/bin/sh' > /tmp/s.sh; echo 'echo script-ok' >> /tmp/s.sh; chmod +x /tmp/s.sh; /tmp/s.sh
