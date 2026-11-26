@@ -163,8 +163,22 @@ object ProotBridge {
                 val rootfs = File(base, "rootfs")
                 // 优先 jniLibs 的系统解压路径：/data/app/.../lib/arm64 有 exec 权限，
                 // 而 filesDir 常被 noexec 挂载（真机实测 error=13 Permission denied）。
-                val nativeProot = File(ctx!!.applicationInfo.nativeLibraryDir, "libproot_exec.so")
-                val proot = if (nativeProot.exists()) nativeProot else File(base, "proot")
+                val nativeLibDir = ctx!!.applicationInfo.nativeLibraryDir
+                val nativeProot = listOf("libproot.so", "libproot_exec.so")
+                    .map { File(nativeLibDir, it) }.firstOrNull { it.exists() }
+                val proot = nativeProot ?: File(base, "proot")
+
+                // ZorvAI 同款：AGP jniLibs 只收 lib*.so，libtalloc.so.2 带版本号结尾会被
+                // 静默排除；把 liblibtalloc.so.2.so 拷成 rootfs/libtalloc.so.2，
+                // 再靠 LD_LIBRARY_PATH 让 linker 按文件名找到它。
+                val tallocDst = File(rootfs, "libtalloc.so.2")
+                if (!tallocDst.exists() || tallocDst.length() == 0L) {
+                    for (n in listOf("liblibtalloc.so.2.so", "libtalloc.so", "libtalloc.so.2.5.0")) {
+                        val src = File(nativeLibDir, n)
+                        if (src.exists()) { src.copyTo(tallocDst, overwrite = true); break }
+                    }
+                }
+                val loader = File(base, "libproot-loader.so")
                 val cmd = listOf(
                     proot.absolutePath,
                     "-0",
@@ -178,9 +192,12 @@ object ProotBridge {
                     "/bin/sh"
                 )
                 val pb = ProcessBuilder(cmd).redirectErrorStream(true)
-                // proot 靠 PROOT_LOADER 找它的 loader（jniLibs 和系统安装路径分离后必须显式给）
-                val loader = File(base, "libproot-loader.so")
+                // proot 每次调用必备的环境（照 ZorvAI MoyuRuntime.prootBaseEnv 的成熟做法）
                 if (loader.exists()) pb.environment()["PROOT_LOADER"] = loader.absolutePath
+                pb.environment()["LD_LIBRARY_PATH"] = rootfs.absolutePath
+                val tmp = File(ctx!!.cacheDir, "proot-tmp").apply { mkdirs() }
+                pb.environment()["PROOT_TMP_DIR"] = tmp.absolutePath
+                pb.environment()["PROOT_NO_SECCOMP"] = "1"
                 val p = pb.start()
                 process = p
                 stdin = p.outputStream
