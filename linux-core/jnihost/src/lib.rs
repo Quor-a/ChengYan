@@ -118,9 +118,15 @@ pub extern "system" fn JNI_OnLoad(
     _vm: *mut core::ffi::c_void,
     _reserved: *mut core::ffi::c_void,
 ) -> i32 {
-    // 这里绝对不能 panic：`extern "system"` 里 unwind 出去会直接 abort 进程，
-    // 表现成「装得上但一加载就闪退」。窗口预留失败也只是降级到 Tier0，不该致命。
-    let _ = catch_unwind(AssertUnwindSafe(ch_kernel::reserve_guest_window));
+    // 这里**不再预留 0x400000 固定窗口**。
+    //
+    // 旧设计：busybox 是 ET_EXEC（写死 0x400000），只能提前 `PROT_NONE` 把
+    // [0x400000, 64MB) 占住，否则 ART/zygote 的 `arch_randomize_brk` 会把宿主堆
+    // 压进来，`MAP_FIXED_NOREPLACE` 抢不到 ⇒ 恒等映射失败 ⇒ 无声回落解释器。
+    //
+    // 现在 guest 是 static PIE（ET_DYN），arena 由 `mmap(NULL)` 让内核挑地址，
+    // 再也不需要固定窗口——「被 ART 抢走」这一整类故障从根上消失。
+    //（只有跑 ET_EXEC 老二进制时才按需预留，见 `Process::new`。）
     // 兜底也要把日志通道建起来：即便 Kotlin 侧忘了调 init()，native 的 eprintln
     // 也不该掉进 /dev/null。init() 内部是 Once，重复调用无副作用。
     let _ = catch_unwind(AssertUnwindSafe(log::init));
@@ -435,11 +441,15 @@ pub extern "system" fn Java_com_chengyan_app_data_LinuxNative_info(
         // 未实现 syscall：真机上「命令没反应/莫名失败」的第一嫌疑。
         // 空串 = 这条会话里 guest 要的 syscall 全都实现了。
         let unimpl = ch_kernel::syscall::unimplemented_report();
+        // arena / pie：真机上「会话起不来」时最先要看的两项。
+        // pie=1 表示走 static PIE（arena 由内核挑）；pie=0 且 arena=0 表示回落 flat 解释器。
+        let (arena, pie) = ch_kernel::last_arena();
         format!(
-            "abi={} window={} tier1={} fallback={} machines={} v={}
+            "abi={} arena={:#x} pie={} tier1={} fallback={} machines={} v={}
 unimpl_total={} unimpl={}",
             std::env::consts::ARCH,
-            if ch_kernel::window_reserved() { "ok" } else { "failed" },
+            arena,
+            if pie { 1 } else { 0 },
             ch_host::native::tier1_hits(),
             ch_host::native::tier1_fallbacks(),
             live,

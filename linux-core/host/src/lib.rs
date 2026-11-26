@@ -316,7 +316,7 @@ impl Session {
         // 符号表全是垃圾 → 野指针 / mallocng 元数据崩坏（runner 侧已踩过，host 侧漏修）。
         // AT_MINSIGSTKSZ(51) 填 5120 才是正确项。
         let aux: [(u64, u64); 21] = [
-            (3, load_vaddr + e_phoff),        // AT_PHDR
+            (3, proc.image.phdr),            // AT_PHDR（PIE 下必须带加载偏移）
             (4, e_phentsize),                 // AT_PHENT
             (5, e_phnum),                     // AT_PHNUM
             (6, 4096),                        // AT_PAGESZ

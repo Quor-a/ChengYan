@@ -175,3 +175,59 @@ guest 内部 fork/exec（`sh script.sh` 里 applet 自己 exec 会断）。
 新增 4 例无界生产者（`yes|head`、`yes|head -c 16|wc -c`、`yes|head -5|wc -l`、
 `yes|tail -1|head -1`）全部输出正确且不再挂死——这是本轮唯一一处「真机可能表现为
 终端卡死」的实际缺陷。
+
+---
+
+## 13. 架构分水岭已落地：ET_DYN（static PIE）+ 每进程任意地址 arena（v1.9.11）
+
+第 3 节列出的第一条差异（**内存基座**）不再只是「承认差距」，本轮改掉了。
+
+### 改之前（ET_EXEC 写死落点）
+
+```
+busybox e_type=2 (ET_EXEC)  LOAD.vaddr = 0x400000
+  ⇒ arena 只能落在 0x400000，64MB 窗口必须 PROT_NONE 提前占住
+  ⇒ ART/zygote 的 arch_randomize_brk 一旦把宿主堆压进 0x400000，
+     MAP_FIXED_NOREPLACE 抢不到 ⇒ 恒等映射失败 ⇒ 无声回落解释器
+  ⇒ 实测 4~8% 进程中招（"同一台机器同一条命令偶尔就不对"）
+  ⇒ 同一时刻只可能有 1 个 guest 进程（fork 架构上不成立）
+```
+
+### 改之后（ET_DYN，内核挑地址）
+
+```
+busybox.static e_type=3 (ET_DYN, static PIE)  LOAD.vaddr = 0
+  ⇒ GuestMem::identity_any() 用 mmap(NULL) 让内核挑空闲地址 ⇒ 永不冲突
+  ⇒ 不再预留任何固定窗口（JNI_OnLoad 里的 reserve_guest_window 已移除）
+  ⇒ 每个 guest 一条独立 arena ⇒ 多进程（fork/exec）的结构前提成立
+```
+
+busybox 取自 Alpine 1.37.0-r31 官方 `busybox-static`（未改一个字节，GPL-2.0，
+见 `docs/THIRD_PARTY_NOTICES.md`）。1.37 比原来那版多 `ssl_client`，rootfs 软链已补齐。
+
+### 代码改动
+
+| 文件 | 改动 |
+|---|---|
+| `kernel/src/elf.rs` | 重写：`info()` 解析头/PT_LOAD 边界；`load()` 支持 ET_EXEC（delta=0）与 ET_DYN（delta=arena_base-lo）；返回 `phdr`（AT_PHDR 的内存地址） |
+| `kernel/src/lib.rs` | `Backing::Ident` 增加 `plain` 标志；新增 `GuestMem::identity_any()`；`Process::new` 按 e_type 分流；新增 `arena()` / `LAST_ARENA` / `LAST_PIE` |
+| `kernel/src/syscall.rs` | `mmap` 的 `MAP_FIXED` 校验与 bump 上界改用 `p.arena()`，不再写死 `MEM_SIZE`/`MMAP_TOP` |
+| `host/src/lib.rs`、`runner/src/main.rs` | `AT_PHDR` 改用 `proc.image.phdr`（PIE 下必须带加载偏移，旧代码拿文件里的 `load_vaddr` 算必错） |
+| `jnihost/src/lib.rs` | `JNI_OnLoad` 不再预留固定窗口；`info()` 输出改为 `arena=0x… pie=0/1` |
+| `assets/rootfs.tar.gz`、`assets/busybox` | 换成 PIE busybox；`Rootfs.VERSION` → `alpine-1.37-pie-2` 强制重解包 |
+
+### 验证（aarch64 VM，qemu-system-aarch64 + Alpine 真内核）
+
+- 47 项矩阵 + 1 项 Tier0 冒烟：**46 × exit 0 + 2 × 故意负例 exit 1**，无 panic
+- 每例都打印 `[ch-tier1 hits=N fallback=M]`：**fallback 全为 0**，`hits>0` 的命令说明
+  真的跑在原生通道上 —— 即 **Tier1 在「内核挑的动态基址」下依然成立**
+- `CH_TIER=0` 解释器冒烟：`echo tier0-ok | wc -c` → `9`，exit 0，`hits=0`（正确回落）
+- 未实现 syscall 报表：47 例中一次都没出现
+
+### 还没做到的（诚实清单，按依赖顺序）
+
+1. **软页表**（Appine `mm.rs` 的对应物）：把 `Backing::Ident` 换成「guest 页表 + 宿主页管理」，
+   才能有 >1 个并发 guest 进程 → 才能有 `fork/execve/wait4`（当前 220/221/260 全未实现）
+2. **动态链接**（`PT_INTERP` + RELATIVE/GLOB_DAT/JUMP_SLOT）：才能跑 Alpine 常规动态 PIE（`apk` 等）
+3. **真 PTY**：依赖 1；有它才有 `^C`(SIGINT)、`isatty()`、`vi/less/top`
+4. **真 DBT**：当前 Tier1 是「svc 改 brk + 信号回调」，功能等价但每条 syscall 两次态切换

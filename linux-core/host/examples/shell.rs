@@ -32,6 +32,13 @@ fn main() {
     let txt = String::from_utf8_lossy(&out.lock().unwrap()).into_owned();
     print!("{txt}");
     eprintln!("[ch-exit {code}]");
+    // 原生执行证据：`hits>0` 且 `fallback=0` 才说明这条命令真的跑在 Tier1 上
+    // （PIE 之后 arena 是内核挑的地址，这两项就是「原生通道在动态基址下仍成立」的凭据）。
+    eprintln!(
+        "[ch-tier1 hits={} fallback={}]",
+        ch_host::native::tier1_hits(),
+        ch_host::native::tier1_fallbacks()
+    );
     // 未实现 syscall 报表：VM 矩阵里这一行就是「内核还缺什么」的直接证据，
     // 在真机上同样的数字由 `linux info` / 终端「自检」给出。
     let ui = ch_kernel::syscall::unimplemented_report();

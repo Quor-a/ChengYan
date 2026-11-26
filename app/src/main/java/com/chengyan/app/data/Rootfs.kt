@@ -8,7 +8,9 @@ import java.io.File
  * tar 解析为最小实现：GZIPInputStream + 512 字节头（支持 typeflag '0'/'5' 与 GNU 'L' 长名）。
  */
 object Rootfs {
-    private const val VERSION = "alpine-3.20-mini-1"
+    // 版本串一变就整包重解压。v2：busybox 换成 Alpine 1.37 的 **static PIE（ET_DYN）**
+    // —— 它让 guest 可以落在任意空闲地址，不再需要预留 0x400000 固定窗口。
+    private const val VERSION = "alpine-1.37-pie-2"
 
     fun ensure(ctx: android.content.Context): Boolean {
         val root = File(ctx.filesDir, "chlinux/rootfs")

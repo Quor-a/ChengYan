@@ -128,7 +128,7 @@ fn main() {
         (lv, lo)
     };
     let aux: [(u64, u64); 20] = [
-        (3, load_vaddr + e_phoff),        // AT_PHDR
+        (3, proc.image.phdr),            // AT_PHDR（PIE 下必须带加载偏移）
         (4, e_phentsize),                 // AT_PHENT
         (5, e_phnum),                     // AT_PHNUM
         (6, 4096),                        // AT_PAGESZ

@@ -10,3 +10,6 @@ app/src/main/assets/busybox          -text
 app/src/main/assets/rootfs.tar.gz    -text
 *.so                                 -text
 *.keystore                           -text
+# 二进制资产：禁止任何换行/编码转换（-text 铁律）
+app/src/main/assets/** -text
+app/src/main/jniLibs/** -text
