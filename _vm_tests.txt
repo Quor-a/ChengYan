@@ -1,0 +1,43 @@
+echo	echo hello-chengyan
+ls 根	ls /
+cat /etc/os-release	cat /etc/os-release
+再跑一次 cat（会话可复用）	cat /etc/alpine-release
+cd 到 /etc 后 pwd	cd /etc; pwd
+cd 后相对 ls	cd /etc; ls os-release
+cd .. 上跳	cd /etc/apk; cd ..; pwd
+cd 不存在目录	cd /nope
+绝对路径不受 cd 影响	cd /etc; cat /etc/alpine-release
+ls | wc -l	ls /etc | wc -l
+grep | cut | head	grep root /etc/passwd | cut -d: -f1 | head -3
+三段管道	cat /etc/passwd | grep -c . 
+> 写入	echo abc > /tmp/t1.txt; cat /tmp/t1.txt
+>> 追加	echo abc > /tmp/t2.txt; echo def >> /tmp/t2.txt; cat /tmp/t2.txt
+< 读取	echo xyz > /tmp/t3.txt; cat < /tmp/t3.txt
+2>&1 合并	ls /definitely-not-here 2>&1 | head -2
+重定向到相对路径	cd /tmp; echo rel > rel.txt; cat /tmp/rel.txt
+export + 展开	export FOO=bar42; echo $FOO
+echo $HOME	echo $HOME
+echo $PWD	echo $PWD
+$? 退出码	false; echo code=$?
+${VAR} 形式	export A=1; echo ${A}end
+unset	export B=9; unset B; echo [$B]
+*.txt 展开	cd /tmp; touch g1.txt g2.txt g3.log; ls *.txt
+? 单字符	cd /tmp; ls g?.log
+无匹配保持原样	cd /tmp; echo nope*.zzz
+&& 成功链	true && echo ok1
+&& 短路	false && echo never
+|| 兜底	false || echo fallback
+; 顺序	echo a; echo b; echo c
+mkdir -p + cd	mkdir -p /tmp/d1/d2; cd /tmp/d1/d2; pwd
+awk 小数	awk 'BEGIN{printf "%.2f\n", 1.5+2.25}'
+sed 替换	echo aaa | sed 's/a/b/g'
+sort | uniq	printf 'b\na\nb\n' | sort | uniq
+sort | head	printf '3\n1\n2\n' | sort | head -2
+head 截断（lseek 回退）	printf '1\n2\n3\n4\n5\n' | head -2
+tail 取尾	printf '1\n2\n3\n4\n5\n' | tail -2
+管道中间段不报 EBADF	printf 'b\na\nb\n' | sort | uniq 2>&1 | wc -l
+find	find /etc -maxdepth 1 -name 'os*'
+cp / mv / rm	echo z > /tmp/m1; cp /tmp/m1 /tmp/m2; mv /tmp/m2 /tmp/m3; cat /tmp/m3; rm -f /tmp/m3; ls /tmp/m3 2>&1 | head -1
+wc -l 多文件	wc -l /etc/passwd /etc/group
+../.. 不出 jail	cd /; ls ../../ 2>&1 | head -3
+读宿主 /etc/shadow	cat ../../../etc/shadow 2>&1 | head -2
