@@ -1,21 +1,34 @@
 #!/bin/sh
 # 从源码交叉编译 ChengYan 自己的 aarch64 Linux 用户空间。
 # 用 zig 0.13 自带的 aarch64-linux-musl libc（不复制任何发行版 rootfs）。
-# 在 WSL 执行：wsl bash -c 'sh "/mnt/d/Calw OS-project/ChengYan/userspace-build/build-zig.sh"'
+#
+# 自包含：busybox 源码本地没有就自动下载，任何有 zig + make + python3 的环境都能跑。
+# 用法（Linux/WSL）：sh userspace-build/build-zig.sh
 set -eu
-PROJ="/mnt/d/Calw OS-project/ChengYan"
-SRC="$PROJ/userspace-build"
-WORK=/tmp/cy-bb          # busybox make 不能在带空格路径工作
+# 脚本所在目录（不写死绝对路径，便于别的环境 clone 后直接跑）
+SRC=$(cd "$(dirname "$0")" && pwd)
+WORK=/tmp/cy-bb          # busybox make 不能在带空格路径工作（如 "Calw OS-project"）
 BB=busybox-1.37.0
-ZIG=zig
+BB_TAR=busybox-1.37.0.tar.bz2
+BB_URL=https://busybox.net/downloads/$BB_TAR
 
-echo "[1/5] 准备源码"
+echo "[1/5] 准备 busybox 源码"
 rm -rf "$WORK"
 mkdir -p "$WORK"
-cp -a "$SRC/$BB" "$WORK/"
+if [ -d "$SRC/$BB" ]; then
+    cp -a "$SRC/$BB" "$WORK/"
+elif [ -f "$SRC/$BB_TAR" ]; then
+    tar -xjf "$SRC/$BB_TAR" -C "$WORK"
+else
+    echo "本地无源码，从 $BB_URL 下载..."
+    curl -fL --retry 3 -o "$WORK/$BB_TAR" "$BB_URL"
+    tar -xjf "$WORK/$BB_TAR" -C "$WORK"
+fi
+[ -d "$WORK/$BB" ] || { echo "busybox 源码就绪失败" >&2; exit 1; }
 cd "$WORK/$BB"
+
 # patch fixdep：zig cc 把 depfile 写进缓存临时目录，fixdep 打不开就报错；
-# 依赖追踪只是增量优化，缺文件时直接成功退出不影响产物。
+# 依赖追踪只是增量优化，缺文件时直接成功退出不影响编译产物。
 python3 - <<'PYEOF'
 p="scripts/basic/fixdep.c"
 s=open(p).read()
@@ -33,10 +46,8 @@ sed -i 's/^CONFIG_SHA1_HWACCEL=y/# CONFIG_SHA1_HWACCEL is not set/' .config
 sed -i 's/^CONFIG_SHA256_HWACCEL=y/# CONFIG_SHA256_HWACCEL is not set/' .config
 
 echo "[2/5] 交叉编译 busybox（zig cc → aarch64-linux-musl）"
-# zig cc 是 gcc/clang 的 drop-in 替代品，直接用 CROSS_COMPILE 指向包装脚本
 cp "$SRC/zig-cc-wrap.sh" "$WORK/aarch64-linux-musl-cc"
 chmod +x "$WORK/aarch64-linux-musl-cc"
-# strip：用 Alpine 的 aarch64 strip（busybox Makefile 会调 $(CROSS_COMPILE)strip）
 cat > "$WORK/aarch64-linux-musl-strip" <<'EOF'
 #!/bin/sh
 exec aarch64-none-elf-strip "$@"
@@ -64,7 +75,6 @@ for d in bin sbin lib etc usr/bin usr/sbin proc sys dev tmp root home; do mkdir 
 cp busybox "$OUT/bin/busybox"
 chmod 755 "$OUT/bin/busybox"
 cd "$OUT/bin"
-# 静态 busybox：aarch64 二进制无法在 host 跑 --list，用固定 applet 列表
 for a in sh ash ls cat echo printf test true false mkdir rm cp mv ln wc grep sed awk sort head tail find chmod chown kill ps env cd pwd date sleep touch df du tar gzip base64 xxd seq vi; do
     ln -sf busybox "$a"
 done

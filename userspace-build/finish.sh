@@ -1,10 +1,12 @@
 #!/bin/sh
-# 组装 rootfs 并拷回项目（build-zig.sh 编译 busybox 成功后的收尾步骤）
+# 收尾步骤：把已编译的 busybox 组装成 rootfs 并拷回项目。
+# 用法（Linux/WSL）：sh userspace-build/finish.sh
 set -eu
+SRC=$(cd "$(dirname "$0")" && pwd)
 WORK=/tmp/cy-bb
 OUT="$WORK/out"
-SRC="/mnt/d/Calw OS-project/ChengYan/userspace-build"
 
+[ -f "$WORK/busybox-1.37.0/busybox" ] || { echo "缺 $WORK/busybox-1.37.0/busybox，先跑 build-zig.sh" >&2; exit 1; }
 rm -rf "$OUT"
 for d in bin sbin lib etc usr/bin usr/sbin proc sys dev tmp root home; do mkdir -p "$OUT/$d"; done
 cp "$WORK/busybox-1.37.0/busybox" "$OUT/bin/busybox"
