@@ -66,6 +66,11 @@ object ProotBridge {
                     ctx!!.assets.open("linux_env/$name").use { input ->
                         dst.outputStream().use { input.copyTo(it) }
                     }
+                }
+                // 必须无条件 chmod：assets 解包出来是 0644，且旧版本残留可能没 x 位。
+                // Android 的 /data/user/.../files 常被挂载为 noexec，chmod 也没用 ——
+                // 所以运行时优先用 jniLibs 里系统解压的 proot（nativeLibraryDir 有 exec 权限）。
+                try { android.system.Os.chmod(dst.path, 0b111101101) } catch (_: Throwable) {
                     dst.setExecutable(true)
                 }
             }
@@ -156,7 +161,10 @@ object ProotBridge {
             try {
                 val base = baseDir()
                 val rootfs = File(base, "rootfs")
-                val proot = File(base, "proot")
+                // 优先 jniLibs 的系统解压路径：/data/app/.../lib/arm64 有 exec 权限，
+                // 而 filesDir 常被 noexec 挂载（真机实测 error=13 Permission denied）。
+                val nativeProot = File(ctx!!.applicationInfo.nativeLibraryDir, "libproot_exec.so")
+                val proot = if (nativeProot.exists()) nativeProot else File(base, "proot")
                 val cmd = listOf(
                     proot.absolutePath,
                     "-0",
@@ -169,9 +177,11 @@ object ProotBridge {
                     "-w", "/",
                     "/bin/sh"
                 )
-                val p = ProcessBuilder(cmd)
-                    .redirectErrorStream(true)
-                    .start()
+                val pb = ProcessBuilder(cmd).redirectErrorStream(true)
+                // proot 靠 PROOT_LOADER 找它的 loader（jniLibs 和系统安装路径分离后必须显式给）
+                val loader = File(base, "libproot-loader.so")
+                if (loader.exists()) pb.environment()["PROOT_LOADER"] = loader.absolutePath
+                val p = pb.start()
                 process = p
                 stdin = p.outputStream
                 stdout = p.inputStream
