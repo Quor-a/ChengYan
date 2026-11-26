@@ -199,11 +199,21 @@ object ProotBridge {
                     }
                 }
                 val loader = File(base, "libproot-loader.so")
+                // 🔴 filesDir 是 noexec 挂载：rootfs/bin/busybox 就算 chmod 0755，
+                // execve 仍被内核拒（真机 execve("/bin/sh"): Permission denied）。
+                // 解法：把自编译 busybox 作为 native library 放进 nativeLibraryDir
+                //（系统安装到有 exec 权限的路径），再用 proot -b 绑到 guest 的 /bin/busybox。
+                // guest 的 /bin/sh 软链 → /bin/busybox → 实际执行 nativeLibraryDir 那份。
+                val busyboxSo = File(nativeLibDir, "libcybusybox.so")
+                val busyboxBind = if (busyboxSo.exists()) {
+                    listOf("-b", "${busyboxSo.absolutePath}:/bin/busybox")
+                } else emptyList()
                 val cmd = listOf(
                     proot.absolutePath,
                     "-0",
                     "-r", rootfs.absolutePath,
                     "--link2symlink",
+                ) + busyboxBind + listOf(
                     "-b", "/dev",
                     "-b", "/proc",
                     "-b", "/sys",

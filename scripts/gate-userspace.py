@@ -33,8 +33,14 @@ with zipfile.ZipFile(APK) as z:
     print("[proot 依赖链]")
     for so in ["lib/arm64-v8a/libproot.so",
                "lib/arm64-v8a/liblibtalloc.so.2.so",
+               # filesDir noexec：busybox 必须走 nativeLibraryDir 才能 execve
+               "lib/arm64-v8a/libcybusybox.so",
                "lib/arm64-v8a/libc++_shared.so"]:
         check(so in names, so)
+    if "lib/arm64-v8a/libcybusybox.so" in names:
+        h = z.read("lib/arm64-v8a/libcybusybox.so")[:20]
+        check(len(h) >= 20 and struct.unpack_from("<H", h, 18)[0] == 0xB7,
+              "libcybusybox.so 是 aarch64 ELF")
 
     # 2) 自编译用户空间资产
     print("[用户空间资产]")
