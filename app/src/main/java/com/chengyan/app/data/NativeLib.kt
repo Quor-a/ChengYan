@@ -57,6 +57,7 @@ internal object NativeLib {
                 loaded = true
                 via = "loadLibrary"
                 detail = (log.toString() + "loadLibrary($LIB) OK").trim()
+                afterLoad(log)
                 return true
             } catch (t: Throwable) {
                 log.append("① loadLibrary(").append(LIB).append(") 失败：").append(trace(t)).append('\n')
@@ -74,6 +75,7 @@ internal object NativeLib {
                         loaded = true
                         via = "nativeLibraryDir"
                         detail = (log.toString() + "System.load(${f.absolutePath}) OK").trim()
+                        afterLoad(log)
                         return true
                     } catch (t: Throwable) {
                         log.append("② System.load(").append(f.absolutePath).append(") 失败：")
@@ -94,6 +96,7 @@ internal object NativeLib {
                     loaded = true
                     via = "apk-extract"
                     detail = (log.toString() + "System.load($self) OK").trim()
+                    afterLoad(log)
                     return true
                 } catch (t: Throwable) {
                     log.append("③ System.load(").append(self).append(") 失败：").append(trace(t)).append('\n')
@@ -103,6 +106,22 @@ internal object NativeLib {
             via = ""
             detail = log.toString().trim().ifBlank { "未知原因" }
             return false
+        }
+    }
+
+    /**
+     * so 装载成功后的第一件事：建原生日志通道。
+     *
+     * 必须在任何 native 调用之前——否则 `eprintln!` 在真机上全进 `/dev/null`，
+     * 之后无论出什么问题都只能靠猜（前三轮真机排障就是这么瞎的）。
+     */
+    private fun afterLoad(log: StringBuilder) {
+        try {
+            LinuxNative.init()
+            log.append("native log 通道已建立")
+        } catch (t: Throwable) {
+            // 日志通道建不起来不该阻断终端，只记录
+            log.append("native init 失败：").append(trace(t))
         }
     }
 

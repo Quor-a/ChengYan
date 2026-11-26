@@ -16,6 +16,15 @@ package com.chengyan.app.data
  */
 internal object LinuxNative {
 
+    /**
+     * 建立原生日志通道：把 fd 2 接进 logcat **和** native 内存环形缓冲。
+     *
+     * 必须先调（so 加载成功后立刻调）。App 进程的 stderr 默认指向 `/dev/null`，
+     * 不接出来，native 侧所有诊断——Tier1 为什么回落、ELF/mmap 为什么失败、
+     * panic 在哪一行——在真机上全部丢失。JNI_OnLoad 里也做了兜底（幂等）。
+     */
+    external fun init()
+
     /** 创建会话（busybox 已装载、rootfs = dataDir/rootfs）；返回 machine 句柄，负数=失败。 */
     external fun start(dataDir: String): Long
 
@@ -35,4 +44,20 @@ internal object LinuxNative {
      * 成功——这是「原生执行」能否成立的前提，也是 VMM 里测不出来的一项。
      */
     external fun info(): String?
+
+    /**
+     * 最近一次失败的完整原因（多行；空串 = 没有失败）。
+     *
+     * 以前 native 只回 `-3` 这种码，真实原因（busybox 读不出来 / ELF 解析失败 /
+     * mmap 拿不到窗口）被 `map_err(|_| ..)` 吞掉，只能靠猜。现在全在这里。
+     */
+    external fun lastError(): String?
+
+    /**
+     * 最近的**原生**日志（stderr 捕获，`max` 字节上限）。
+     *
+     * 与 `info()` 一起构成「不连电脑也能看见真话」的闭环：Tier1 回落原因、
+     * panic 位置、`[ch-native]` 诊断全在里面。
+     */
+    external fun logTail(max: Int): String?
 }

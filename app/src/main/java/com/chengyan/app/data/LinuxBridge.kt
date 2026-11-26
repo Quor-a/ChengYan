@@ -117,7 +117,10 @@ object LinuxBridge {
                     -3L -> "引擎会话创建失败（busybox ELF 加载失败）"
                     else -> "未知错误"
                 }
-                return fail("[ch-native] 会话启动失败（$m）：$why\n${nativeInfo()}")
+                val detail = nativeLastError().takeIf { it.isNotBlank() } ?: "（native 未提供细节）"
+                return fail(
+                    "[ch-native] 会话启动失败（$m）：$why\n" + detail + "\n" + nativeInfo()
+                )
             }
             return m
         }
@@ -203,6 +206,26 @@ object LinuxBridge {
         }
     }
 
+    /** native 上一次失败的完整原因（多行）。取不到就返回空串，绝不抛。 */
+    fun nativeLastError(): String = try {
+        if (NativeLib.ensure(ctx)) LinuxNative.lastError() ?: "" else NativeLib.detail
+    } catch (t: Throwable) {
+        "[ch-native] lastError 取用失败 ${t::class.simpleName}: ${t.message}"
+    }
+
+    /**
+     * 原生 stderr 日志尾部（Tier1 回落原因、panic 位置、`[ch-native]` 诊断都在里面）。
+     *
+     * 这是「不连电脑也能看见真话」的通道：真机出问题时终端页「自检」直接打出来，
+     * 不用 adb、不用抓 logcat。
+     */
+    fun nativeLogTail(max: Int = 8 * 1024): String = try {
+        if (NativeLib.ensure(ctx)) LinuxNative.logTail(max) ?: "" else ""
+    } catch (t: Throwable) {
+        "[ch-native] logTail 取用失败 ${t::class.simpleName}: ${t.message}"
+    }
+
+
     /** 原生侧自检（so 已加载才有意义）：window 能否预留、Tier1 命中数等。 */
     fun nativeInfo(): String = try {
         if (!NativeLib.ensure(ctx)) NativeLib.failureText() else LinuxNative.info() ?: "（info 返回 null）"
@@ -220,6 +243,8 @@ object LinuxBridge {
         append("native: ").append(nativeInfo()).append('\n')
         if (lastError.isNotBlank()) append("lastError:\n").append(lastError).append('\n')
         if (!NativeLib.loaded) append('\n').append(NativeLib.detail).append('\n')
+        val tail = nativeLogTail()
+        if (tail.isNotBlank()) append("— native 日志（尾部）—" + "\n").append(tail).append('\n')
     }
 
     private fun parseState(json: String): State {

@@ -178,7 +178,7 @@ object LinuxTool {
             s.outputLen > 0 -> "（输出缓冲有 ${s.outputLen} 字节，但解不出可显示文本——可能全是控制序列/二进制；终端页可见）"
             else -> "（无输出；命令可能只做了重定向/副作用，exit code=${s.exit}）"
         }
-        return "[ch-linux build v1.9.8 | ${com.chengyan.app.data.NativeLib.summary()}]\n$head\n$status\n输出（stdout 与 stderr 合并）:\n$body"
+        return "[ch-linux build v1.9.9 | ${com.chengyan.app.data.NativeLib.summary()}]\n$head\n$status\n输出（stdout 与 stderr 合并）:\n$body"
     }
 
     /** 剥离 ANSI/VT100 转义序列：CSI 序列、OSC 及其他 ESC 引导的控制序列。 */
