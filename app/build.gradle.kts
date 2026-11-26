@@ -14,6 +14,14 @@ android {
         targetSdk = 34
         versionCode = 12
         versionName = "1.9.12"
+        // 真 PTY（forkpty）：静态 busybox 直接挂在 PTY 上，不需要 proot。
+        externalNativeBuild {
+            cmake {
+                cppFlags += ""
+                arguments += "-DANDROID_STL=none"
+            }
+        }
+        ndk { abiFilters += "arm64-v8a" }
     }
 
     signingConfigs {
@@ -35,6 +43,9 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
+    }
+    externalNativeBuild {
+        cmake { path = file("src/main/cpp/CMakeLists.txt") }
     }
     kotlinOptions { jvmTarget = "17" }
     buildFeatures { compose = true }

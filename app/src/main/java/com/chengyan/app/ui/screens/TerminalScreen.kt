@@ -172,7 +172,7 @@ fun TerminalScreen(onBack: () -> Unit) {
                     if (histIdx >= history.size) histIdx = -1
                 }
             }
-            QuickKey("^C") { LinuxBridge.restart(); clearAt = 0 }
+            QuickKey("^C") { LinuxBridge.interrupt() }
             Spacer(Modifier.weight(1f))
             // 自检：so 加载通路 / 原生窗口预留 / 会话句柄 / 内存，一次全打出来。
             QuickKey("自检") { error = LinuxBridge.diag() }
