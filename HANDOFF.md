@@ -25,6 +25,14 @@ TerminalScreen (Compose UI，保留原样)
 2. **静态 ET_EXEC 不能做 PIE 门控**：`libbash.so`/`libbusybox.so`/`libloader.so` 都是 e_type=2 无 PT_INTERP，内核 binfmt_elf 直接映射执行；`isPieElf` 误判跳过建链 → exec 不存在的文件 → 终端必死。
 3. **软链失败必须退实体拷贝**：云手机 FUSE FS 不支持 symlink；只 Log+return 会导致 usr/bin/cy-bash 不存在 → 黑屏。
 
+## 返回导航（全局）
+`MainActivity` 用单一界面栈 `backStack: SnapshotStateList<Route>` 管理所有界面：
+- 根 `CHAT` 永远在栈底；`SETTINGS / PREFS / TERMINAL` 逐层 push。
+- `BackHandler { pop() }` 注册在栈根，系统返回键/手势只 pop 一层；栈底才 `finish()` 退出。
+- 支持二层路径 `SETTINGS → PREFS`，返回 PREFS → SETTINGS → CHAT。
+- 对话框/下拉菜单/ModalBottomSheet 由 Compose 自带 BackHandler 先消费，返回只关弹窗不穿层。
+- **铁律：新增界面必须走 push/pop，禁止再加独立 boolean 标志，也不要依赖 Activity 默认返回。**
+
 ## UI 说明（终端页）
 `TerminalScreen.kt` 保持形态：顶栏 / 输出区 / 快捷键行 / 输入行。
 视觉为澄言原创暖墨终端配色（TermTheme）：三层底色递进、状态徽章、等宽输出字、
