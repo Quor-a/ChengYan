@@ -1,0 +1,58 @@
+name: engine-e2e
+
+# 引擎真值测试：在真实 Linux 上跑 Alpine aarch64 busybox，
+# 验证「终端能不能用」（管道/重定向/cd/变量/glob/常用工具链）。
+# 本地 WSL 环境不可用时，用这个 workflow 出事实基线。
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "linux-core/**"
+      - "_e2e.sh"
+      - ".github/workflows/engine-e2e.yml"
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: 缓存 cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            linux-core/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('linux-core/**/Cargo.toml') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: 准备 busybox 与 rootfs
+        run: |
+          set -e
+          mkdir -p /tmp/cy/jail
+          cp app/src/main/assets/busybox /tmp/cy/bb
+          tar xzf app/src/main/assets/rootfs.tar.gz -C /tmp/cy/jail
+          # 复现 Rootfs.kt 的补丁：包内只有 busybox.static，334 个 applet 软链指向 /bin/busybox
+          if [ ! -f /tmp/cy/jail/bin/busybox ]; then
+            cp /tmp/cy/jail/bin/busybox.static /tmp/cy/jail/bin/busybox
+            chmod +x /tmp/cy/jail/bin/busybox
+          fi
+          ls -l /tmp/cy/bb /tmp/cy/jail/bin/busybox
+
+      - name: 构建
+        working-directory: linux-core
+        run: |
+          set -o pipefail
+          cargo build --release -p ch-host --example shell -p ch-runner 2>&1 | tail -60
+
+      - name: 单元测试
+        working-directory: linux-core
+        run: cargo test --release 2>&1 | tail -40
+
+      - name: 终端行为矩阵
+        run: sh _e2e.sh

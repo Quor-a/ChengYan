@@ -13,3 +13,10 @@ linux-core/*.log
 *.apk
 build_*.log
 test_*.log
+
+# 交叉编译用的 aarch64 musl 运行库快照（2.2MB 二进制，按需重建）
+_a64lib/
+# 手工链接实验产物
+_mintest_dyn
+_vm_out*.log
+_vm_final.log

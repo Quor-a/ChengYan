@@ -1,0 +1,12 @@
+# Rust 引擎源码与脚本必须保持 LF：这些文件要在 Linux 宿主里编译/执行，
+# CRLF 会被 cargo/sh 当成内容的一部分（尤其 heredoc 与脚本 shebang）。
+linux-core/**/*.rs        text eol=lf
+linux-core/**/Cargo.toml  text eol=lf
+linux-core/**/*.toml      text eol=lf
+*.sh                      text eol=lf
+
+# 资产是逐字节引用的二进制，禁止 git 做换行归一化
+app/src/main/assets/busybox          -text
+app/src/main/assets/rootfs.tar.gz    -text
+*.so                                 -text
+*.keystore                           -text

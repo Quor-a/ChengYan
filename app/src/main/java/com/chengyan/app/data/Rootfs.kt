@@ -13,7 +13,11 @@ object Rootfs {
     fun ensure(ctx: android.content.Context): Boolean {
         val root = File(ctx.filesDir, "chlinux/rootfs")
         val marker = File(root, ".rc")
-        if (marker.exists() && marker.readText().trim() == VERSION) return true
+        // 已安装：只做幂等补丁（不删用户数据）。缺 /bin/busybox 的老包就地补齐。
+        if (marker.exists() && marker.readText().trim() == VERSION) {
+            patchBusybox(root)
+            return true
+        }
         try {
             root.deleteRecursively()
             root.mkdirs()
@@ -110,9 +114,27 @@ object Rootfs {
         }
     }
 
+    /**
+     * 幂等补丁：根包里 /bin/sh、/bin/ls 等 334 个 applet 全是符号链接 → /bin/busybox，
+     * 但包内只带了 bin/busybox.static（改名遗留），这些链接**全部悬空**——任何走
+     * PATH 或 #!/bin/sh 的路径都会 ENOENT。Android 应用私有目录不允许建软链，
+     * 所以直接复制一份 /bin/busybox（1.1MB）。已存在则跳过。
+     */
+    private fun patchBusybox(root: File) {
+        val bbStatic = root.resolve("bin/busybox.static")
+        val bb = root.resolve("bin/busybox")
+        if (!bbStatic.isFile || bbStatic.length() <= 0L) return
+        if (bb.isFile && bb.length() > 0L) return
+        try {
+            bbStatic.copyTo(bb, overwrite = true)
+            bb.setExecutable(true)
+        } catch (e: Exception) { /* 不阻断：host 仍以 busybox.static 直接跑 applet */ }
+    }
+
     private fun finish(root: File, cleanEof: Boolean): Boolean {
         if (!cleanEof) return false
         root.resolve("tmp").mkdirs()
+        patchBusybox(root)
         root.resolve(".rc").writeText(VERSION)
         return true
     }

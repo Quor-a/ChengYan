@@ -115,7 +115,10 @@ fun TerminalScreen(onBack: () -> Unit) {
                 // clearAt 是设置清屏那一刻的绝对长度；输出环形缓冲截断后 st.output 会变短，
                 // 直接 drop 会返回空串导致画面全白。clamp 到当前长度：新输出仍可见。
                 val from = clearAt.coerceAtMost(st.output.length)
-                val text = (probeOut?.let { it + "\n\n" } ?: "") + renderOut(st.output.drop(from), st.busy, st.exit)
+                // 输出缓冲现在跨命令累积（保留会话历史），但 Compose 每 150ms 轮询时
+                // 对全量文本做布局会明显卡顿。只渲染尾部窗口，历史仍可通过滚动查看近期内容。
+                val window = st.output.drop(from).let { if (it.length > 30_000) it.takeLast(30_000) else it }
+                val text = (probeOut?.let { it + "\n\n" } ?: "") + renderOut(window, st.busy, st.exit)
                 Text(
                     text.ifBlank {
                         "澄言 Linux · 进程内 busybox（ARM64 二进制翻译，无 root）\n输入命令回车执行。试：ls / 或 echo hello"
