@@ -6,9 +6,9 @@ import java.nio.file.Files
 import java.nio.file.Paths
 
 /**
- * ChengYan 终端运行时 —— **照 ZorvAI terminal-core 完整架构搬入，发行版换 Alpine Linux 3.24**。
+ * ChengYan 终端运行时 —— **Alpine Linux 3.24 rootfs + proot + 真 PTY，独立实现**。
  *
- * 完整链路（与 ZorvAI `TerminalEnvironment` 一致，仅去品牌化）：
+ * 完整链路（自研实现）：
  *   1) linkNativeLibs(): nativeLibraryDir 的交叉编译工具链（bash/busybox/proot/loader/talloc）
  *      无条件建链到 usr/bin（静态 ET_EXEC，软链失败退实体拷贝 —— 云手机 FS 兼容）
  *   2) createBusyboxSymlinks(): usr/bin 下铺 busybox applet 链
@@ -18,7 +18,7 @@ import java.nio.file.Paths
  *   6) buildProotLaunch(): proot -r rootfs ... /bin/sh -l ...（proot 作为 PTY 直接子进程）
  *   7) Pty.start(proot...) → fallback 600ms 验活 → 回落系统 shell 打屏
  *
- * 关键（ZorvAI 复盘铁律）：proot 必须是 PTY 的**直接**子进程，不能经宿主 bash 中转，
+ * 关键铁律：proot 必须是 PTY 的**直接**子进程，不能经宿主 bash 中转，
  * 否则 loader 注入 PEEKDATA 失败 → 黑屏。静态 ET_EXEC 不能被 isPieElf 门控误判跳过建链。
  */
 object TtyBridge {
@@ -40,6 +40,18 @@ object TtyBridge {
     private var pty: Pty? = null
     private val outBuf = StringBuilder()
     private var initialized = false
+
+    // ---- 会话状态机（独立设计：哨兵退出码协议）----
+    // 终端是常驻 shell：写入一条命令后，shell 继续执行、PTY 持续吐输出，
+    // 必须有个可靠的信号告诉宿主「这条命令跑完了，退出码是多少」。
+    // 方案：run() 在命令尾部追加一条 printf，打印带唯一序号的真实退出码 $?；
+    // poll() 扫到该标记即 busy=false + exit=rc。比提示符正则可靠（提示符会
+    // 被程序输出伪装、PS1 可变），标记是宿主自己注入的、不会与业务输出冲突。
+    @Volatile private var busy = false
+    @Volatile private var lastExit: Int? = null
+    private var seq = 0L                 // 命令序号，标记自带，防旧标记误匹配
+    private var cmdStartMs = 0L          // 命令起始时间，用于超时兜底
+    private const val CMD_TIMEOUT_MS = 600_000L   // 单命令 10 分钟超时兜底
 
     private val filesDir: File get() = ctx!!.filesDir
     private val usrDir: File get() = File(filesDir, "usr")
@@ -101,7 +113,7 @@ object TtyBridge {
         }
 
         linkOne("libbusybox.so", "busybox")
-        // 与 ZorvAI 分名：cy-bash 是终端自己的 bash，避免与其它子系统抢路径。
+        // cy-bash 是终端自己的 bash，独立命名避免与其它子系统抢路径。
         linkOne("libbash.so", "cy-bash")
         linkOne("libbash.so", "bash")
         linkOne("libproot.so", "proot")
@@ -213,7 +225,7 @@ install_alpine(){
         "PROOT_TMP_DIR" to File(filesDir, "tmp").absolutePath,
     )
 
-    /** proot 作为 PTY 直接子进程 —— 照 ZorvAI buildProotLaunch。 */
+    /** proot 作为 PTY 直接子进程。 */
     private fun buildProotLaunch(): Array<String> {
         val rootfs = File(usrDir, "var/lib/proot-distro/installed-rootfs/alpine")
         val tmpDir = File(filesDir, "tmp").absolutePath
@@ -292,10 +304,20 @@ install_alpine(){
 
     fun run(cmd: String): Long {
         if (pty == null && ensure() <= 0) return -10L
+        // 上一条命令还没收到完成标记：拒绝新命令（UI 已有 -3 提示）。
+        // 常驻 shell 若并发写两条命令，两条的 $? 标记会交错 → 状态机错乱。
+        if (busy) { lastError = "上一条命令尚未完成"; return -3L }
+        val id = ++seq
         return try {
-            pty!!.stdin.write((cmd + "\n").toByteArray())
+            // 哨兵协议：命令照原样交给 shell，尾部追加一条只回显退出码的 printf。
+            //   <cmd>; __cy_rc=$?; printf '\\n__CY_DONE_<id>_%d__\\n' "$__cy_rc"
+            // 用中间变量存 $?，避免 printf 自身改写退出码；标记带 id 防历史输出误匹配。
+            val line = SessionProtocol.wrap(cmd, id)
+            pty!!.stdin.write(line.toByteArray())
             pty!!.stdin.flush()
-            1L
+            busy = true
+            cmdStartMs = System.currentTimeMillis()
+            id
         } catch (e: Throwable) {
             lastError = "写入失败：${e.message}"
             -10L
@@ -307,6 +329,8 @@ install_alpine(){
             try {
                 val s = pty?.stdout
                 if (s != null) {
+                    // 一次 read 只取当前可用字节，PTY 是被行规程按块喂的，
+                    // 标记可能被拆到两次 read —— 所以扫描必须针对累积的 outBuf。
                     val n = s.available()
                     if (n > 0) {
                         val buf = ByteArray(minOf(n, 1 shl 16))
@@ -315,16 +339,38 @@ install_alpine(){
                     }
                 }
             } catch (_: Throwable) {}
-            return State(pty?.isAlive() == true, null, outBuf.toString(), outBuf.length)
+
+            // 扫描累积输出里的完成标记：只认当前序号，命中即翻转状态。
+            if (busy) {
+                val hit = SessionProtocol.exitCodeOf(outBuf.toString(), seq)
+                if (hit != null) {
+                    lastExit = hit
+                    busy = false
+                } else if (System.currentTimeMillis() - cmdStartMs > CMD_TIMEOUT_MS) {
+                    // 超时兜底：命令卡死（等待输入/网络）时不能让 busy 永远为真，
+                    // 否则 UI 一直「运行中」、工具的 wait 永远等下去。
+                    busy = false
+                    lastExit = -1
+                    append("[timeout] 命令超过 ${CMD_TIMEOUT_MS / 1000}s 未完成\n")
+                }
+            }
+            val visible = SessionProtocol.stripMarkers(outBuf.toString())
+            return State(pty?.isAlive() == true, lastExit, visible, visible.length)
         }
     }
 
-    /** ^C：往 PTY 主端写 0x03，线路规程转成 SIGINT 发前台进程组。 */
+    /** ^C：往 PTY 主端写 0x03，线路规程转成 SIGINT 发前台进程组；同时立即结束本命令状态。 */
     fun interrupt() {
         try { pty?.stdin?.write(0x03); pty?.stdin?.flush() } catch (_: Throwable) {}
+        if (busy) {
+            busy = false
+            lastExit = 130   // 128 + SIGINT(2)，与 POSIX shell 一致
+        }
     }
 
     private fun append(s: String) {
+        // 原始字节全部进 outBuf：状态机要从中扫描完成标记，绝不能在这里过滤。
+        // 显示层（poll 返回 State.output）才剥掉标记回显，UI 形态无需改动。
         outBuf.append(s)
         if (outBuf.length > 384 * 1024) outBuf.delete(0, outBuf.length - 384 * 1024)
     }
@@ -336,18 +382,23 @@ install_alpine(){
             outBuf.setLength(0)
             lastError = ""
             initialized = false
+            busy = false
+            lastExit = null
             return ensure() > 0
         }
     }
 
     fun diag(): String = buildString {
-        appendLine("runtime=Alpine Linux 3.24 rootfs + proot + real PTY (ZorvAI architecture)")
+        appendLine("runtime=Alpine Linux 3.24 rootfs + proot + real PTY")
         appendLine("rootfs=${File(usrDir, "var/lib/proot-distro/installed-rootfs/alpine").absolutePath}")
         appendLine("tarball=${File(filesDir, ALPINE_FILENAME).let { "${it.exists()} ${it.length()}" }}")
         appendLine("cyBash=${File(binDir, "cy-bash").let { "${it.exists()} ${it.canExecute()}" }}")
         appendLine("proot=${File(binDir, "proot").let { "${it.exists()} ${it.canExecute()}" }}")
         appendLine("loader=${File(binDir, "loader").let { "${it.exists()} ${it.canExecute()}" }}")
         appendLine("ptyAlive=${pty?.isAlive() == true}")
+        appendLine("--- 会话状态机 ---")
+        appendLine("busy=$busy lastExit=$lastExit seq=$seq rawLen=${outBuf.length}")
+        appendLine("markerHit=${SessionProtocol.exitCodeOf(outBuf.toString(), seq) != null}")
         appendLine("lastError=$lastError")
     }
 

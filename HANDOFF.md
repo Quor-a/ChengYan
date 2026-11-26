@@ -3,9 +3,9 @@
 > 最后更新：2026-11-27。目标：另一个环境 clone 后能直接构建、理解架构、继续开发。
 > 工程根：`D:/Calw OS-project/ChengYan`（GitHub `Quor-a/ChengYan`，main 分支）
 
-## 1. 架构（照 ZorvAI terminal-core 完整搬入，去品牌化）
+## 1. 架构（独立实现）
 
-**终端 = Alpine Linux 3.24 rootfs + proot + 真 PTY**。架构照 ZorvAI terminal-core 完整搬入（去品牌化），发行版按用户要求换成 Alpine Linux 3.24：
+**终端 = Alpine Linux 3.24 rootfs + proot + 真 PTY**。发行版按用户要求为 Alpine Linux 3.24，运行时独立实现：
 
 ```
 TerminalScreen (Compose UI，保留原样)
@@ -20,7 +20,7 @@ TerminalScreen (Compose UI，保留原样)
   → Pty.start(proot...)        JNI forkpty → execvpe，proot 是 PTY **直接**子进程
 ```
 
-### 三条铁律（ZorvAI 复盘，违反就黑屏）
+### 三条铁律（违反就黑屏）
 1. **proot 必须是 PTY 直接子进程**，不能经宿主 bash 中转 —— 否则 loader 注入 PEEKDATA 失败 → 黑屏。
 2. **静态 ET_EXEC 不能做 PIE 门控**：`libbash.so`/`libbusybox.so`/`libloader.so` 都是 e_type=2 无 PT_INTERP，内核 binfmt_elf 直接映射执行；`isPieElf` 误判跳过建链 → exec 不存在的文件 → 终端必死。
 3. **软链失败必须退实体拷贝**：云手机 FUSE FS 不支持 symlink；只 Log+return 会导致 usr/bin/cy-bash 不存在 → 黑屏。

@@ -33,7 +33,8 @@ import com.chengyan.app.ui.theme.Ink2
 import com.chengyan.app.ui.theme.Ink3
 import com.chengyan.app.ui.theme.Ok
 import kotlinx.coroutines.delay
-
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.launch
 
 /** 终端配色（深墨底 × 暖纸字，澄言原创）。 */
@@ -60,19 +61,25 @@ fun TerminalScreen(onBack: () -> Unit) {
 
     // 进入终端页就确保会话已建立（否则 poll 在 machine<=0 时直接返回空状态，
     // 首次打开必须等用户输入命令才有输出，看起来像"终端坏了"）。
+    // 🔴 必须在 IO 线程调 ensure(): 首启要解压 rootfs（waitFor 最长 600s）+ forkpty +
+    // 600ms 验活，全是阻塞操作。放主线程会直接 ANR（真机已复现 Input dispatching timed out）。
     LaunchedEffect(Unit) {
-        val r = runCatching { LinuxBridge.ensure() }.getOrElse {
-            error = "会话启动失败：${it.javaClass.simpleName} ${it.message}"
-            return@LaunchedEffect
+        val r = withContext(Dispatchers.IO) {
+            runCatching { LinuxBridge.ensure() }.getOrElse {
+                error = "会话启动失败：${it.javaClass.simpleName} ${it.message}"
+                return@withContext -10L
+            }
         }
         if (r <= 0) error = LinuxBridge.lastError.ifBlank { "会话启动失败（$r）" }
     }
-    // 150ms 轮询 native 输出。poll 的结果写进 stateFlow，页面收集它才会重组刷新——
-    // 旧实现读 LinuxBridge.current()（AtomicReference）不触发重组，输出永远停在首帧。
+    // 150ms 轮询 native 输出。poll 读 PTY + 扫状态机，同样切 IO，避免大输出时
+    // 阻塞主线程导致滑动卡顿/ANR。poll 结果写进 stateFlow 触发重组。
     LaunchedEffect(Unit) {
         while (true) {
             delay(150)
-            runCatching { LinuxBridge.poll() }.onFailure { error = it.message }
+            withContext(Dispatchers.IO) {
+                runCatching { LinuxBridge.poll() }.onFailure { error = it.message }
+            }
         }
     }
     val st by LinuxBridge.stateFlow.collectAsState()
@@ -89,17 +96,22 @@ fun TerminalScreen(onBack: () -> Unit) {
         if (follow) outScroll.animateScrollTo(outScroll.maxValue)
     }
 
+    val scope = rememberCoroutineScope()
     fun send(cmd: String) {
         if (cmd.isBlank()) return
         history = history + cmd
         histIdx = -1
-        val r = LinuxBridge.run(cmd)
-        if (r < 0) {
-            error = when {
-                r == -3L -> "会话忙：上一个命令还在运行（等退出或点「重建会话」）"
-                else -> LinuxBridge.lastError.ifBlank { "启动失败（$r）" }
-            }
-        } else error = null
+        // run 内部可能触发 ensure（首次/会话死后重建），解压 + forkpty 会阻塞，
+        // 必须切 IO —— 主线程做这些会 ANR。
+        scope.launch(Dispatchers.IO) {
+            val r = LinuxBridge.run(cmd)
+            error = if (r < 0) {
+                when {
+                    r == -3L -> "会话忙：上一个命令还在运行（等退出或点「重建会话」）"
+                    else -> LinuxBridge.lastError.ifBlank { "启动失败（$r）" }
+                }
+            } else null
+        }
     }
 
     Column(Modifier.fillMaxSize().background(Ink)) {
@@ -176,7 +188,13 @@ fun TerminalScreen(onBack: () -> Unit) {
             Spacer(Modifier.weight(1f))
             // 自检：so 加载通路 / 原生窗口预留 / 会话句柄 / 内存，一次全打出来。
             QuickKey("自检") { error = LinuxBridge.diag() }
-            QuickKey("重建") { LinuxBridge.restart(); clearAt = 0 }
+            // 重建会 destroy PTY + 重新解压/建会话，阻塞 → 切 IO，否则主线程 ANR。
+            QuickKey("重建") {
+                scope.launch(Dispatchers.IO) {
+                    LinuxBridge.restart()
+                    clearAt = 0
+                }
+            }
             Spacer(Modifier.width(8.dp))
             QuickKey("探针") {
                 probeOut = "探测中…"

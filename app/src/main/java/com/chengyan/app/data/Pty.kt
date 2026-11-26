@@ -8,7 +8,7 @@ import java.io.InputStream
 import java.io.OutputStream
 
 /**
- * 真 PTY（forkpty）——照 ZorvAI 的 Pty.kt 去品牌化。
+ * 真 PTY（forkpty）——澄言独立实现。
  *
  * 关键：这不是 ProcessBuilder 的管道，而是 JNI forkpty 出来的真终端：
  * 有 controlling tty，^C 发 SIGINT，isatty=1，行规程由内核完成。
