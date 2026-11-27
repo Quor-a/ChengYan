@@ -114,6 +114,7 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit, onOpenPrefs: () ->
                 ConversationDrawer(
                     conversations = vm.conversations,
                     currentId = vm.current?.id,
+                    activeSoulName = vm.souls.firstOrNull { it.id == vm.activeSoulId }?.name,
                     onPick = { vm.pick(it); closeDrawer() },
                     onDelete = { vm.deleteConversation(it) },
                     onNew = { vm.newConversation(); closeDrawer() },
@@ -405,6 +406,7 @@ private fun ModelChip(config: com.chengyan.app.data.ModelConfig, onClick: () -> 
 private fun ConversationDrawer(
     conversations: List<Conversation>,
     currentId: Long?,
+    activeSoulName: String? = null,
     onPick: (Long) -> Unit,
     onDelete: (Long) -> Unit,
     onNew: () -> Unit,
@@ -433,6 +435,20 @@ private fun ConversationDrawer(
             }
             IconButton(onClick = onClose, Modifier.size(36.dp)) {
                 Icon(Icons.Filled.Close, "关闭", Modifier.size(20.dp), tint = Ink)
+            }
+        }
+        // 统计条：对话数 + 当前灵魂，一眼看到侧栏状态
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 2.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("共 ${conversations.size} 条对话", fontSize = 11.sp, color = Ink4)
+            Spacer(Modifier.weight(1f))
+            if (activeSoulName != null) {
+                Surface(shape = RoundedCornerShape(20.dp), color = AccentSoft) {
+                    Text("灵魂 · $activeSoulName", fontSize = 10.sp, color = AccentInk,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp))
+                }
             }
         }
         Column(

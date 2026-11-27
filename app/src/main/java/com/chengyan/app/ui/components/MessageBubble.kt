@@ -227,7 +227,18 @@ fun MessageBubble(
                     )
                 } else {
                     Column(Modifier.fillMaxWidth()) {
-                        MarkdownText(message.content)
+                        // ui-card 富卡片：从正文摘出围栏 JSON，渲染成结构化组件
+                        val parsed = remember(message.content) {
+                            com.chengyan.app.data.UiCardParser.parse(message.content)
+                        }
+                        MarkdownText(parsed.first)
+                        if (parsed.second.isNotEmpty()) {
+                            Spacer(Modifier.height(8.dp))
+                            parsed.second.forEach { card ->
+                                UiCardView(card)
+                                Spacer(Modifier.height(6.dp))
+                            }
+                        }
                         if (message.streaming) StreamingCursor()
                     }
                 }
@@ -532,6 +543,59 @@ private fun AttachmentBubble(a: com.chengyan.app.data.Attachment) {
                         )
                     }
                 }
+            }
+        }
+    }
+}
+
+/* ==================== ui-card 富卡片渲染 ==================== */
+/** 卡片渲染：note/list/kv/action/code —— 与 parseComponentSpec 协议对应。 */
+@Composable
+private fun UiCardView(card: com.chengyan.app.data.UiCardParser.Card) {
+    val accent = if (card.tone == "accent" || card.tone == "warn") AccentInk else Ink2
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = androidx.compose.ui.graphics.Color(0xFFFBF7EE),
+        border = androidx.compose.foundation.BorderStroke(1.dp, Line2),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(Modifier.padding(horizontal = 14.dp, vertical = 12.dp)) {
+            if (card.title.isNotBlank()) {
+                Text(card.title, fontWeight = FontWeight.SemiBold, fontSize = 14.sp, color = accent)
+                Spacer(Modifier.height(6.dp))
+            }
+            when (card.kind) {
+                com.chengyan.app.data.UiCardParser.Kind.NOTE,
+                com.chengyan.app.data.UiCardParser.Kind.CODE -> {
+                    if (card.body.isNotBlank()) {
+                        Text(card.body, fontSize = 13.sp, color = Ink,
+                            fontFamily = if (card.kind == com.chengyan.app.data.UiCardParser.Kind.CODE) FontFamily.Monospace else FontFamily.Default,
+                            lineHeight = 20.sp)
+                    }
+                }
+                com.chengyan.app.data.UiCardParser.Kind.LIST -> {
+                    card.items.forEach { item ->
+                        Row(Modifier.padding(vertical = 2.dp)) {
+                            Text("· ", fontSize = 13.sp, color = accent)
+                            Text(item, fontSize = 13.sp, color = Ink, modifier = Modifier.weight(1f))
+                        }
+                    }
+                }
+                com.chengyan.app.data.UiCardParser.Kind.KV -> {
+                    card.kv.forEach { (k, v) ->
+                        Row(Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
+                            Text(k, fontSize = 12.sp, color = Ink2, modifier = Modifier.weight(1f))
+                            Text(v, fontSize = 12.sp, color = Ink, fontWeight = FontWeight.Medium)
+                        }
+                    }
+                }
+                com.chengyan.app.data.UiCardParser.Kind.ACTION -> {
+                    if (card.body.isNotBlank()) Text(card.body, fontSize = 13.sp, color = Ink)
+                    card.actions.forEach { a ->
+                        Text("▸ $a", fontSize = 12.sp, color = accent, modifier = Modifier.padding(top = 4.dp))
+                    }
+                }
+                else -> if (card.body.isNotBlank()) Text(card.body, fontSize = 13.sp, color = Ink)
             }
         }
     }

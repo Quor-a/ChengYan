@@ -293,7 +293,11 @@ fun SettingsScreen(
                 Spacer(Modifier.height(16.dp))
             }
 
+            // ====== 06 系统能力（无障碍 / Shizuku）======
+            ChapterLabel("06", "系统能力")
+            SystemCapabilitySection(context)
 
+            Spacer(Modifier.height(16.dp))
         }
     }
 
@@ -421,6 +425,79 @@ fun SettingsScreen(
 }
 
 /* ==================== 组件（移植自 QuroSettingsComponents.kt，配色换澄言主题） ==================== */
+
+/** 系统能力状态卡：无障碍服务 / Shizuku 授权，附跳转入口。 */
+@Composable
+private fun SystemCapabilitySection(context: android.content.Context) {
+    var a11yOn by remember { mutableStateOf(false) }
+    var shizukuOn by remember { mutableStateOf(false) }
+    fun refresh() {
+        // 无障碍：系统设置里已启用的服务列表是否包含本包
+        a11yOn = runCatching {
+            val enabled = android.provider.Settings.Secure.getString(
+                context.contentResolver,
+                android.provider.Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+            ).orEmpty()
+            enabled.contains(context.packageName)
+        }.getOrDefault(false)
+        // Shizuku：反射调用隐藏的 ServiceManager.getService（不引 SDK，纯检测）
+        shizukuOn = runCatching {
+            val sm = Class.forName("android.os.ServiceManager")
+            val method = sm.getDeclaredMethod("getService", String::class.java)
+            method.isAccessible = true
+            val binder = method.invoke(null, "shizuku") as? android.os.IBinder
+            binder != null && binder.isBinderAlive
+        }.getOrDefault(false)
+    }
+    LaunchedEffect(Unit) { refresh() }
+
+    Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = Paper2)) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            CapabilityRow(
+                icon = "♿", name = "无障碍服务",
+                desc = if (a11yOn) "已启用 · 可执行自动化点击/输入" else "未启用 · 部分自动化工具不可用",
+                on = a11yOn,
+                actionLabel = "去设置",
+                onAction = {
+                    runCatching {
+                        context.startActivity(
+                            android.content.Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                                .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                        )
+                    }
+                }
+            )
+            androidx.compose.material3.HorizontalDivider(color = Line)
+            CapabilityRow(
+                icon = "⚙", name = "Shizuku",
+                desc = if (shizukuOn) "已授权 · 可用系统级 API" else "未授权 · 需先安装 Shizuku 并授权",
+                on = shizukuOn,
+                actionLabel = "刷新",
+                onAction = { refresh() }
+            )
+        }
+    }
+}
+
+@Composable
+private fun CapabilityRow(
+    icon: String, name: String, desc: String, on: Boolean,
+    actionLabel: String, onAction: () -> Unit,
+) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Text(icon, fontSize = 20.sp)
+        Spacer(Modifier.width(12.dp))
+        Column(Modifier.weight(1f)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(name, style = MaterialTheme.typography.bodyLarge, color = Ink)
+                Spacer(Modifier.width(8.dp))
+                Box(Modifier.size(7.dp).background(if (on) Ok else Ink4, CircleShape))
+            }
+            Text(desc, style = MaterialTheme.typography.bodySmall, color = Ink3)
+        }
+        TextButton(onClick = onAction) { Text(actionLabel, color = AccentInk) }
+    }
+}
 
 /** 章节小标题（编辑排版风）：陶土色衬线序号 + 衬线标题 + 分隔线 */
 @Composable

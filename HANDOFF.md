@@ -42,6 +42,20 @@ TerminalScreen (Compose UI，保留原样)
 - 消息气泡 `AttachmentBubble`：图片缩略图、视频卡片(点击系统播放器)、文档卡片(点击打开)。
 - 单测 `AttachmentTypeTest`（5）+ `SessionProtocolTest`（8）共 13 项。
 
+## 灵魂注入（内置角色库）
+`data/BuiltinSouls.kt` 四个内置角色（小澄/言砚/墨语/码匠），四段式设定：身份锚点/能力边界/行为准则/表达风格。
+`SoulRepository.loadAll()` 缺哪个补哪个，不覆盖用户编辑过的内置。
+`SoulCard.toSystemPrompt()` 身份锁首尾声明 + 角色标签 + ui-card 能力说明 + 记忆注入。
+
+## ui-card 富卡片（组件渲染 SDK）
+`data/UiCard.kt`：模型在回复里输出 ```ui-card JSON 围栏 → 解析成 Card(note/list/kv/action/code)。
+`MessageBubble.UiCardView` 渲染成暖纸卡片；正文里围栏被摘除避免重复显示。
+**术语铁律**：可视化小卡片 = ui_widget/ui_card 富卡片，不是 visual_popup/visual_question/ui_control。
+系统提示词里说明了 ui-card 用法，模型才知道有这个能力。单测 5 项。
+
+## 系统能力设置
+`SettingsScreen` 第 06 章「系统能力」：无障碍服务状态(去设置)/Shizuku 状态(反射 ServiceManager.getService，纯检测不引 SDK)。
+
 ## 返回导航（全局）
 `MainActivity` 用单一界面栈 `backStack: SnapshotStateList<Route>` 管理所有界面：
 - 根 `CHAT` 永远在栈底；`SETTINGS / PREFS / TERMINAL` 逐层 push。

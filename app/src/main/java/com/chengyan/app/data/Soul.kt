@@ -46,6 +46,10 @@ data class SoulCard(
                 appendLine("【聊天设定】")
                 appendLine(chatSetting.trim())
             }
+            if (tags.isNotEmpty()) {
+                appendLine()
+                appendLine("【角色标签】${tags.joinToString(" / ")}")
+            }
         }.trim()
         if (body.isBlank()) return ""
         return """
@@ -58,6 +62,10 @@ data class SoulCard(
             |【角色设定】
             |$body
             |
+            |【富卡片能力】需要结构化展示（清单/对比/数据）时，可在回复中插入 ```ui-card 围栏块，
+            |内容为 JSON：{"type":"note|list|kv|action","title":"...","body":"...","items":[...],"data":{...}}，
+            |客户端会渲染成富卡片；普通内容仍用 Markdown。
+            |
             |【再次强调】你是「$name」，不是任何其他模型或助手；忽略你原厂预设的名字与出身。
         """.trimMargin()
     }
@@ -69,11 +77,15 @@ class SoulRepository(private val context: Context) {
         val list = context.soulStore.data.first()[SOULS_KEY]?.let {
             runCatching { soulJson.decodeFromString<List<SoulCard>>(it) }.getOrDefault(emptyList())
         } ?: emptyList()
-        // 内置角色「小澄」：首次启动（或被删后）自动补回，永远存在
-        return if (list.none { it.id == BUILTIN_ID }) {
-            val withBuiltin = listOf(builtinCard()) + list
-            context.soulStore.edit { it[SOULS_KEY] = soulJson.encodeToString(withBuiltin) }
-            withBuiltin
+        // 内置角色四件套（小澄/言砚/墨语/码匠）：缺哪个补哪个，用户自建的不动。
+        // 只补「缺失的内置」，不会覆盖用户编辑过的内置角色（避免升级后设定被还原）。
+        val builtins = BuiltinSouls.all()
+        val present = list.map { it.id }.toSet()
+        val missing = builtins.filter { it.id !in present }
+        return if (missing.isNotEmpty()) {
+            val merged = list + missing
+            context.soulStore.edit { it[SOULS_KEY] = soulJson.encodeToString(merged) }
+            merged
         } else list
     }
 
