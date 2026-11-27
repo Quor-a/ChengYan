@@ -55,6 +55,9 @@ object LinuxBridge {
 
     fun restart(): Boolean = TtyBridge.restart().also { poll() }
 
+    /** App 退出回收：强杀终端运行时进程组 + 孤儿清扫（MainActivity.onDestroy 调用）。 */
+    fun shutdown() = TtyBridge.shutdown()
+
     /** ^C：真 PTY 线路规程发 SIGINT 给前台进程组（比整机重建更正确）。 */
     fun interrupt() = TtyBridge.interrupt()
 

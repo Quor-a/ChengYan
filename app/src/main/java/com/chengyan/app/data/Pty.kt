@@ -17,18 +17,37 @@ import java.io.OutputStream
 class Pty(
     val process: Process,
     val masterFd: FileDescriptor,
-    private val pid: Int,
+    val pid: Int,
 ) {
     val stdout: InputStream = FileInputStream(masterFd)
     val stdin: OutputStream = FileOutputStream(masterFd)
 
     fun isAlive(): Boolean = process.isAlive
 
+    /** 温和销毁：SIGHUP 整组（线路规程会话断开），关两端 fd，并回收子进程防 zombie。 */
     fun destroy() {
-        process.destroy()
-        try { stdout.close() } catch (_: Throwable) {}
-        try { stdin.close() } catch (_: Throwable) {}
+        runCatching { killGroup(pid, 1) }          // SIGHUP → 进程组（含 Alpine 内 sh）
+        process.destroy()                           // 兼容原路径：SIGHUP 直达 proot
+        runCatching { Companion.waitPidTimeout(pid, 1500) }
+        runCatching { stdout.close() }
+        runCatching { stdin.close() }
     }
+
+    /**
+     * 强制销毁：SIGKILL 整个进程组 + SIGKILL 本人 + 阻塞等待真死。
+     * restart 前必须走这个 —— 旧 proot/ash 没死透就开新会话 = 进程泄漏
+     * （真机复现：5 组 proot+sh 常驻，load 9.0）。
+     */
+    fun destroyForcibly(): Int {
+        runCatching { killGroup(pid, 9) }          // SIGKILL → 整组
+        runCatching { android.os.Process.killProcess(pid) }
+        val rc = Companion.waitPidTimeout(pid, 3000)
+        runCatching { stdout.close() }
+        runCatching { stdin.close() }
+        return rc
+    }
+
+    fun waitForExit(timeoutMs: Long): Int = Companion.waitPidTimeout(pid, timeoutMs.toInt())
 
     companion object {
         init {
@@ -70,6 +89,8 @@ class Pty(
             cmdArray: Array<String>, envArray: Array<String>, workingDir: String
         ): IntArray
         private external fun waitFor(pid: Int): Int
+        private external fun killGroup(pid: Int, sig: Int): Int
+        private external fun waitPidTimeout(pid: Int, timeoutMs: Int): Int
     }
 
     fun setWindowSize(rows: Int, cols: Int): Boolean = setPtyWindowSize(masterFdInt, rows, cols) == 0

@@ -19,6 +19,15 @@ import com.chengyan.app.ui.theme.ChengYanTheme
 private enum class Route { CHAT, SETTINGS, PREFS, TERMINAL }
 
 class MainActivity : ComponentActivity() {
+    override fun onDestroy() {
+        super.onDestroy()
+        // App 退出：整组强杀 proot/ash + 孤儿清扫，杜绝终端运行时进程泄漏（load 累积根因）。
+        // destroyForcibly 阻塞最多 3s，放后台线程避免阻塞主线程销毁流程。
+        java.util.concurrent.Executors.newSingleThreadExecutor().execute {
+            runCatching { com.chengyan.app.data.LinuxBridge.shutdown() }
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val settings = SettingsStore(this)

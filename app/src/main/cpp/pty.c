@@ -3,6 +3,7 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <sys/wait.h>
 #include <sys/ioctl.h>
 #include <android/log.h>
@@ -110,6 +111,32 @@ Java_com_chengyan_app_data_Pty_00024Companion_waitFor(JNIEnv *env, jobject thiz,
         return WEXITSTATUS(status);
     }
     return -1;
+}
+
+/**
+ * 杀整个进程组。forkpty→login_tty→setsid 使子进程成为 session/group leader，
+ * pgid == pid，kill(-pid) 会同时命中 proot 及其在 Alpine 里拉起的全部 sh/子进程。
+ * 这是进程泄漏（每次 restart 残留一组 proot+sh）的根治点：只 SIGHUP proot 本人
+ * 杀不掉被 reparent 的孙进程。
+ */
+JNIEXPORT jint JNICALL
+Java_com_chengyan_app_data_Pty_00024Companion_killGroup(JNIEnv *env, jclass clazz, jint pid, jint sig) {
+    return kill(-(pid_t)pid, sig);
+}
+
+/** 带超时的 waitpid（WNOHANG 轮询）：0=已回收，-1=错误/已不存在，-2=超时仍活着 */
+JNIEXPORT jint JNICALL
+Java_com_chengyan_app_data_Pty_00024Companion_waitPidTimeout(JNIEnv *env, jclass clazz, jint pid, jint timeoutMs) {
+    int status;
+    int waited = 0;
+    while (waited < timeoutMs) {
+        pid_t r = waitpid((pid_t)pid, &status, WNOHANG);
+        if (r == (pid_t)pid) return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+        if (r < 0) return -1;   /* ECHILD：已被回收或非本进程子进程 */
+        usleep(20000);
+        waited += 20;
+    }
+    return -2;
 }
 
 /**

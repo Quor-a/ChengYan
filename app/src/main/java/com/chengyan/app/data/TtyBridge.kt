@@ -276,9 +276,17 @@ install_alpine(){
 
     fun ensure(): Long {
         synchronized(lock) {
-            if (pty != null && pty!!.isAlive()) return 1L
+            if (pty != null) {
+                if (pty!!.isAlive()) return 1L
+                // 旧 pty 已死（崩溃/退出）：先强杀回收整组 + 回收 fd，绝不能直接开新会话
+                runCatching { pty!!.destroyForcibly() }
+                pty = null
+            }
             if (ctx == null) { lastError = "TtyBridge.init 未调用"; return -10L }
             if (!ensureInit()) return -10L
+            // 启动自检：扫杀历史泄漏的 proot/ash 进程（同 uid 可杀），防 load 累积
+            val swept = killOrphanRuntimes()
+            if (swept > 0) lastError = "self-check: 清理残留运行时进程 $swept 个"
             if (!prepareGuestRootfs()) return -10L
             val env = prootEnv()
             val cmd = buildProotLaunch()
@@ -394,15 +402,78 @@ install_alpine(){
         return rawCache
     }
 
+    /** master fd 残留字节 drain：旧命令的半截输出（如标记回显碎片）不能带进新会话。 */
+    private fun drainPty() {
+        val s = pty?.stdout ?: return
+        try {
+            var guard = 0
+            while (guard++ < 64) {
+                val n = s.available()
+                if (n <= 0) break
+                val buf = ByteArray(minOf(n, 1 shl 16))
+                if (s.read(buf) <= 0) break
+            }
+        } catch (_: Throwable) {}
+    }
+
+    /**
+     * 孤儿运行时清扫：扫 /proc 找同 uid 下残留的 proot / Alpine ash 进程并 SIGKILL。
+     * 只能杀同 uid 进程（Android 内核保证），所以不会伤到系统其他进程；
+     * 本 App 主进程（myPid）与当前存活 pty 一律跳过。
+     * 返回杀掉的个数。
+     */
+    fun killOrphanRuntimes(): Int {
+        val livePid = pty?.takeIf { it.isAlive() }?.pid ?: -1
+        var killed = 0
+        val procDir = File("/proc")
+        val dirs = procDir.listFiles { f -> f.name.all { it.isDigit() } } ?: return 0
+        for (d in dirs) {
+            val pid = d.name.toIntOrNull() ?: continue
+            if (pid == android.os.Process.myPid() || pid == livePid) continue
+            val cmdline = runCatching {
+                File(d, "cmdline").readBytes().toString(Charsets.UTF_8).replace('\u0000', ' ')
+            }.getOrDefault("")
+            if (cmdline.isEmpty()) continue
+            val isOrphan = cmdline.contains("proot") ||
+                (cmdline.contains("/bin/sh") && cmdline.contains("-l"))
+            if (isOrphan) {
+                if (runCatching { android.os.Process.killProcess(pid) }.isSuccess) killed++
+            }
+        }
+        return killed
+    }
+
+    /** App 退出（onDestroy）调用：整组强杀 + 孤儿清扫，不留任何运行时进程。 */
+    fun shutdown() {
+        synchronized(lock) {
+            drainPty()
+            runCatching { pty?.destroyForcibly() }
+            pty = null
+            killOrphanRuntimes()
+        }
+    }
+
     fun restart(): Boolean {
         synchronized(lock) {
-            try { pty?.destroy() } catch (_: Throwable) {}
-            pty = null
+            // 1) drain master fd 残留字节（旧命令半截流）
+            drainPty()
+            // 2) 强杀整组 + 阻塞等待真死：旧 proot/ash 没死透就开新会话 = 每次累积一对
+            val p = pty
+            if (p != null) {
+                val rc = runCatching { p.destroyForcibly() }.getOrDefault(-1)
+                if (rc == -2) {
+                    // 3s 还没死（极端）：再补一轮 SIGKILL
+                    runCatching { p.destroyForcibly() }
+                }
+                pty = null
+            }
+            // 3) 自检兜底：扫杀任何历史泄漏的运行时进程
+            val swept = killOrphanRuntimes()
             outBuf.setLength(0)
             visibleCache = ""
             rawCache = ""
             visibleDirty = true
-            lastError = ""
+            lastError = if (swept > 0) "restart: 清理残留进程 $swept 个" else ""
             initialized = false
             busy = false
             lastExit = null
