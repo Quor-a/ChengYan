@@ -9,7 +9,6 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
 
 // 澄言原创配色：暖纸 × 墨色 × 陶土橙
@@ -84,9 +83,10 @@ fun ChengYanTheme(darkTheme: Boolean = isSystemInDarkTheme(), content: @Composab
     )
 }
 
-/** 内置 CJK 字体：部分设备系统字体链在本 App 进程内拿不到中文字形（豆腐块），
- *  因此把 Noto Sans SC（OFL 授权）打进 APK，全 App 统一使用。 */
-val FontCJK = FontFamily(Font(R.font.notosanssc))
+/** CJK 字体：改用系统字体链（移除内置 8.3MB Noto Sans SC 以瘦身 APK）。
+ *  豆腐块真根因是 kotlin daemon 的 ASCII 编码问题（gradle.properties 已修），
+ *  系统字体链中文字形在正常设备上可靠。保留别名让引用点零改动。 */
+val FontCJK = FontFamily.Default
 
 private val AppTypography: Typography = run {
     val d = Typography()
