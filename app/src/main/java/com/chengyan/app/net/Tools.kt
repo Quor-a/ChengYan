@@ -57,6 +57,25 @@ object Tools {
         add(buildJsonObject {
             put("type", "function")
             put("function", buildJsonObject {
+                put("name", "web_search")
+                put("description", "联网网页搜索，返回带标题/链接/摘要的结果列表。用于查资料、新闻、技术文档、事实核实。中文查询质量最佳；英文查询可用。需要更新或具体网页内容时配合 linux 工具 busybox wget 抓取全文。")
+                put("parameters", buildJsonObject {
+                    put("type", "object")
+                    put("properties", buildJsonObject {
+                        put("query", buildJsonObject {
+                            put("type", "string"); put("description", "搜索关键词（中文或英文）")
+                        })
+                        put("count", buildJsonObject {
+                            put("type", "number"); put("description", "返回条数 1-10，默认 6")
+                        })
+                    })
+                    put("required", buildJsonArray { add(kotlinx.serialization.json.JsonPrimitive("query")) })
+                })
+            })
+        })
+        add(buildJsonObject {
+            put("type", "function")
+            put("function", buildJsonObject {
                 put("name", "linux")
                 put("description", "操控设备内置的 Alpine Linux 3.24 容器（musl libc + busybox 工具集，proot 用户态隔离，无 root）。" +
                     "注意发行版差异：不是 Ubuntu——①默认 shell 是 busybox ash；bash 会在首次联网启动时自动安装（终端横幅见 BASH_OK），可用 bash 数组/[[ ]]；" +
@@ -101,6 +120,10 @@ object Tools {
                 "随机数（$min~$max）：${(min..max).random()}"
             }
             "linux" -> LinuxTool.run(str("action") ?: "run", str("command"), num("timeout_secs"))
+            "web_search" -> WebSearch.search(
+                str("query") ?: throw IllegalArgumentException("缺少 query"),
+                (num("count").takeIf { it > 0 } ?: 6.0).toInt()
+            )
             else -> "未知工具：$name"
         }
     }.getOrElse { "工具执行出错：${it.message}" }

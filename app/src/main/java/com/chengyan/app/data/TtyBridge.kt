@@ -209,14 +209,28 @@ install_alpine(){
 }
 # 完整 bash：Alpine minirootfs 只有 ash。解压后从官方 CDN 拉 bash + 依赖
 # （readline/ncurses）解入 rootfs，之后 bash 离线可用。无网络时静默跳过。
+# 🔴 解析规则：APKINDEX 优先（权威但可能滞后）、目录页兜底（可能缺包）——
+#    两者实测都会临时缺数据，必须双源。
 fetch_bash(){
   [ -x "${'$'}GUEST_PATH/bin/bash" ] || [ -x "${'$'}GUEST_PATH/usr/bin/bash" ] && return 0
   CDN=https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64
-  # 🔴 解析目录页而非 APKINDEX（索引滞后，readline 曾缺失）；文件名规则：包名后紧跟数字
-  #    （排除 -dbg/-dev/-doc/-static）；排序后取最后一个=最新版
-  page=${'$'}(wget -qO- "${'$'}CDN/" 2>/dev/null) || { echo CDN_FAIL; return 0; }
+  APKIDX=${'$'}TMPDIR/APKINDEX
+  # APKINDEX 尽力拉取（失败不影响，走目录页兜底）
+  wget -qO "${'$'}TMPDIR/apkidx.tar.gz" "${'$'}CDN/APKINDEX.tar.gz" 2>/dev/null \
+    && busybox tar xzf "${'$'}TMPDIR/apkidx.tar.gz" -O APKINDEX > "${'$'}APKIDX" 2>/dev/null
+  rm -f "${'$'}TMPDIR/apkidx.tar.gz"
+  page=${'$'}(wget -qO- "${'$'}CDN/" 2>/dev/null)
+  # resolve_pkg NAME -> 文件名；APKINDEX 精确行匹配 P:NAME/V:；目录页锚定 href=" 且包名后紧跟数字（排 -dbg/-dev 等）
+  resolve_pkg(){
+    name=${'$'}1
+    if [ -f "${'$'}APKIDX" ]; then
+      v=${'$'}(grep -x -A2 "P:${'$'}name" "${'$'}APKIDX" 2>/dev/null | grep "^V:" | head -1 | cut -d: -f2)
+      [ -n "${'$'}v" ] && { echo "${'$'}name-${'$'}v.apk"; return 0; }
+    fi
+    echo "${'$'}page" | grep -o '"'"${'$'}name"'-[0-9][^"<>]*\.apk' | sort -u | tail -1
+  }
   for name in bash readline libncursesw ncurses-libs ncurses-terminfo-base; do
-    f=${'$'}(echo "${'$'}page" | grep -o "${'$'}name-[0-9][^\\"<>]*\\.apk" | sort -u | tail -1)
+    f=${'$'}(resolve_pkg "${'$'}name")
     [ -n "${'$'}f" ] || continue
     wget -qO "${'$'}TMPDIR/${'$'}f" "${'$'}CDN/${'$'}f" 2>/dev/null || continue
     # 🔴 apk 是多段 gzip 拼接（签名+控制+数据），tar xzf 只解第一段必须 gzip -dc | tar
@@ -361,7 +375,7 @@ fetch_bash(){
             pty = p
             append("ChengYan terminal ready (Alpine 3.24 musl + bash/ash, via proot + real PTY)\n")
             append("[tip] 首次联网启动会自动从 Alpine 官方源安装 bash（BASH_OK=成功）；python3/gcc 等用 `apk add` 装；下载用 busybox wget\n")
-            append("[build] v1.9.19 (19) · ${com.chengyan.app.BuildConfig.BUILD_STAMP}\n")
+            append("[build] v1.9.20 (20) · ${com.chengyan.app.BuildConfig.BUILD_STAMP}\n")
             return 1L
         }
     }
@@ -553,7 +567,7 @@ fetch_bash(){
 
     fun diag(): String = buildString {
         appendLine("runtime=Alpine Linux 3.24 rootfs + proot + real PTY")
-        appendLine("[build] v1.9.19 (19) · ${com.chengyan.app.BuildConfig.BUILD_STAMP}")
+        appendLine("[build] v1.9.20 (20) · ${com.chengyan.app.BuildConfig.BUILD_STAMP}")
         appendLine("rootfs=${File(usrDir, "var/lib/proot-distro/installed-rootfs/alpine").absolutePath}")
         appendLine("tarball=${File(filesDir, ALPINE_FILENAME).let { "${it.exists()} ${it.length()}" }}")
         appendLine("cyBash=${File(binDir, "cy-bash").let { "${it.exists()} ${it.canExecute()}" }}")
