@@ -135,7 +135,9 @@ fun joinSpans(lines: List<String>): List<MdSpan> {
 @Composable
 fun MarkdownText(content: String, modifier: Modifier = Modifier) {
     Column(modifier) {
-        parseMarkdown(content).forEach { node -> MdNodeView(node) }
+        // 🔴 remember：任何重组（兄弟节点状态变化/流式 tick）都不要再跑全文正则解析
+        val nodes = remember(content) { parseMarkdown(content) }
+        nodes.forEach { node -> MdNodeView(node) }
     }
 }
 

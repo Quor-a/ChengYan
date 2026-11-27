@@ -373,8 +373,13 @@ object PhoneTools {
             val body = needArg(args, "body") ?: return ToolOutcome("send 需要 body 参数")
             if (context.checkSelfPermission(Manifest.permission.SEND_SMS) != android.content.pm.PackageManager.PERMISSION_GRANTED)
                 return ToolOutcome("发送短信需要 SEND_SMS 权限，请在「手机能力授权」中授予。")
-            android.telephony.SmsManager.getDefault().sendTextMessage(address, null, body, null, null)
-            return ToolOutcome("已向 $address 发送短信：「${body.take(80)}」")
+            // 🔴 安全：AI 不能静默发短信——走系统确认界面（用户点发送才真正发出）
+            val intent = Intent(Intent.ACTION_SENDTO, Uri.parse("smsto:$address")).apply {
+                putExtra("sms_body", body)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            runCatching { context.startActivity(intent) }
+            return ToolOutcome("已打开系统短信确认界面（等待用户确认发送）：$address")
         }
         val address = needArg(args, "address")
         val resolver = context.contentResolver
@@ -405,7 +410,8 @@ object PhoneTools {
             val number = needArg(args, "number") ?: return ToolOutcome("call 需要 number 参数")
             if (context.checkSelfPermission(Manifest.permission.CALL_PHONE) != android.content.pm.PackageManager.PERMISSION_GRANTED)
                 return ToolOutcome("直接拨号需要 CALL_PHONE 权限。未授予时可改用系统拨号盘。")
-            val intent = Intent(Intent.ACTION_CALL, Uri.parse("tel:$number")).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            // 🔴 安全：ACTION_CALL 直接拨出；改 ACTION_DIAL 走系统拨号盘由用户确认
+            val intent = Intent(Intent.ACTION_DIAL, Uri.parse("tel:$number")).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             context.startActivity(intent)
             return ToolOutcome("已发起对 $number 的拨号（系统会显示通话界面）。")
         }
@@ -689,7 +695,11 @@ object PhoneTools {
             }
             "app_read" -> {
                 val path = needArg(args, "path") ?: return ToolOutcome("app_read 需要 path 参数")
+                // 🔴 路径穿越校验（与 app_write 一致）：canonical path 必须留在 filesDir 内
+                if (path.contains("..")) return ToolOutcome("非法路径")
                 val f = java.io.File(context.filesDir, path)
+                if (runCatching { f.canonicalPath.startsWith(context.filesDir.canonicalPath) }.getOrDefault(false).not())
+                    return ToolOutcome("非法路径")
                 if (!f.exists()) return ToolOutcome("文件不存在：$path")
                 return ToolOutcome(f.readText(Charsets.UTF_8).take(MAX_TEXT))
             }

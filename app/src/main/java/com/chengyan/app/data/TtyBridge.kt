@@ -39,7 +39,7 @@ object TtyBridge {
     private val readLock = Any()
     private var pty: Pty? = null
     private val outBuf = StringBuilder()
-    private var initialized = false
+    private var initSwept = false
 
     // ---- 会话状态机（独立设计：哨兵退出码协议）----
     // 终端是常驻 shell：写入一条命令后，shell 继续执行、PTY 持续吐输出，
@@ -62,6 +62,9 @@ object TtyBridge {
 
     fun init(context: Context) {
         ctx = context.applicationContext
+        // 🔴 幂等：MainActivity 组合内会重复调用 init，每次都新开 executor 全扫 /proc（且可能误杀）
+        if (initSwept) return
+        initSwept = true
         // App 一启动就清旧账：上一版泄漏的 proot/ash 在 App 升级后仍然驻留（同 uid），
         // 拖满 load（真机 load 9.1 ANR）。不能等用户打开终端（ensure()）才清——
         // 用户可能一直停在聊天页，旧进程照样把主线程饿死。
@@ -69,6 +72,7 @@ object TtyBridge {
             runCatching { val n = killOrphanRuntimes(); if (n > 0) lastError = "启动自检: 清理残留运行时进程 $n 个" }
         }
     }
+    private var initialized = false
 
     // ---------------- 初始化（照 TerminalEnvironment.initializeEnvironment）----------------
 
@@ -308,13 +312,14 @@ install_alpine(){
             if (!p.isAlive()) {
                 val code = runCatching { p.process.exitValue() }.getOrDefault(-1)
                 append("proot 立即退出 exit=$code，回落系统 shell\n")
-                runCatching { p.destroy() }
+                // 🔴 必须强杀整组并等死：SIGHUP 会被 proot 忽略，子进程 reparent 后成泄漏
+                runCatching { p.destroyForcibly() }
                 pty = Pty.start(fallback("proot exit=$code"), env, filesDir)
             } else {
                 pty = p
             }
             append("ChengYan terminal ready (Alpine 3.24 + proot + real PTY)\n")
-            append("[build] v1.9.14 (14) · ${com.chengyan.app.BuildConfig.BUILD_STAMP}\n")
+            append("[build] v1.9.15 (15) · ${com.chengyan.app.BuildConfig.BUILD_STAMP}\n")
             return 1L
         }
     }
@@ -443,13 +448,12 @@ install_alpine(){
                 File(d, "cmdline").readBytes().toString(Charsets.UTF_8).replace('\u0000', ' ')
             }.getOrDefault("")
             if (cmdline.isEmpty()) continue
-            val isOrphan = cmdline.contains("proot") ||
-                cmdline.contains("busybox") ||
-                cmdline.contains("ash") ||
-                (cmdline.contains("/bin/sh") && !cmdline.contains("com.chengyan")) ||
-                cmdline.contains("-l") && (cmdline.contains("sh") || cmdline.contains("bash"))
-            // 匹配放宽：旧进程 cmdline 形态多变（proot/ash/busybox/sh -l），
-            // 宁多杀不漏杀——Android 只允许同 uid，误伤面天然为零（自己进程已跳过）。
+            val argv0 = cmdline.trim().substringBefore(' ')
+            val base = argv0.substringAfterLast('/')
+            // 🔴 精确匹配 argv[0]：旧规则 contains("ash") 会命中 cy-bash（自己的 rootfs 准备进程），
+            //    contains("-l") 会命中 "ls -l" 等任意参数——真机会误杀正在解压的 prepareGuestRootfs。
+            val isOrphan = base == "proot" || base == "libproot.so" ||
+                base == "ash" || base == "sh" || base == "busybox"
             if (isOrphan) {
                 if (runCatching { android.os.Process.killProcess(pid) }.isSuccess) killed++
             }
@@ -497,7 +501,7 @@ install_alpine(){
 
     fun diag(): String = buildString {
         appendLine("runtime=Alpine Linux 3.24 rootfs + proot + real PTY")
-        appendLine("[build] v1.9.14 (14) · ${com.chengyan.app.BuildConfig.BUILD_STAMP}")
+        appendLine("[build] v1.9.15 (15) · ${com.chengyan.app.BuildConfig.BUILD_STAMP}")
         appendLine("rootfs=${File(usrDir, "var/lib/proot-distro/installed-rootfs/alpine").absolutePath}")
         appendLine("tarball=${File(filesDir, ALPINE_FILENAME).let { "${it.exists()} ${it.length()}" }}")
         appendLine("cyBash=${File(binDir, "cy-bash").let { "${it.exists()} ${it.canExecute()}" }}")

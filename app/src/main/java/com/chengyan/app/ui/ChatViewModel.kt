@@ -15,11 +15,15 @@ import com.chengyan.app.data.ApiProviderType
 import com.chengyan.app.data.ModelConfig
 import com.chengyan.app.data.SettingsStore
 import com.chengyan.app.net.OpenAiClient
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class ChatViewModel(
     private val appContext: android.content.Context,
@@ -38,11 +42,13 @@ class ChatViewModel(
      * 流式期间最多每 80ms 刷新一次；工具完成/流结束等关键点强制刷新。
      */
     private var lastUiRefreshMs = 0L
+    private fun streamingThrottled(): Boolean = System.currentTimeMillis() - lastUiRefreshMs < 80
     private fun refreshUi(c: Conversation, force: Boolean = false) {
         val now = System.currentTimeMillis()
         if (force || now - lastUiRefreshMs >= 80) {
             lastUiRefreshMs = now
-            current = null; current = c
+            // 单次赋值：旧实现先写 null 再写实例，两次快照失效导致 LazyColumn 全量重组
+            current = c
         }
     }
 
@@ -588,7 +594,9 @@ class ChatViewModel(
                         when (ev) {
                             is OpenAiClient.StreamEvent.Delta -> {
                                 contentBuf.append(ev.text)
-                                ai.content = contentBuf.toString()
+                                // 🔴 每 delta 全串 toString 是 O(n²) 分配（minor faults 元凶之一）：
+                                //    只在节流点刷新 UI 时才拷贝一次
+                                if (!streamingThrottled()) ai.content = contentBuf.toString()
                                 refreshUi(c)
                             }
                             is OpenAiClient.StreamEvent.ThinkingDelta -> {
@@ -635,9 +643,17 @@ class ChatViewModel(
                         if (!streaming) break   // 用户点停止：中断后续调用（此时消息会标记已停止）
                         val args = tc.result
                         val outcome = if (tc.name.startsWith("phone_"))
-                            com.chengyan.app.net.PhoneTools.execute(appContext, tc.name, args)
+                            // 🔴 工具可能同步磁盘 IO/长轮询（linux wait 最长 600s sleep），必须在后台线程跑，
+                            //    否则 Main dispatcher 直接 ANR（真机已复现）。ensureActive() 让 stop() 立即生效。
+                            withContext(Dispatchers.Default) {
+                                kotlinx.coroutines.currentCoroutineContext().ensureActive()
+                                com.chengyan.app.net.PhoneTools.execute(appContext, tc.name, args)
+                            }
                         else
-                            com.chengyan.app.net.ToolOutcome(com.chengyan.app.net.Tools.execute(tc.name, args))
+                            withContext(Dispatchers.Default) {
+                                kotlinx.coroutines.currentCoroutineContext().ensureActive()
+                                com.chengyan.app.net.ToolOutcome(com.chengyan.app.net.Tools.execute(tc.name, args))
+                            }
                         // 手机工具带回的图片（相机/相册）附加到 AI 消息：用户可见，多模态模型下一轮也能看到
                         outcome.imageBase64?.let { b64 -> if (ai.images.size < 4) ai.images = ai.images + b64 }
                         val info = com.chengyan.app.data.ToolCallInfo(tc.id, tc.name, args, outcome.result)
@@ -692,7 +708,8 @@ class ChatViewModel(
         // 🔴 快照必须包含 current：newConversation 只改 current 不进列表，
         //    旧实现存的是不含当前对话的列表 → 重启后记录全部丢失
         val snapshot = (conversations + listOfNotNull(current)).distinctBy { it.id }
-        viewModelScope.launch { chats.save(snapshot) }
+        // 🔴 全量对话（含 base64 附件）序列化+DataStore 写盘不能在主线程（对话多时秒级卡顿）→ IO
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) { chats.save(snapshot) }
         // 同步回内存列表，保证抽屉/搜索立即可见
         conversations = snapshot
     }

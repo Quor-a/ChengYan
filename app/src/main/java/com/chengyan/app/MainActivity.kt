@@ -21,6 +21,9 @@ private enum class Route { CHAT, SETTINGS, PREFS, TERMINAL }
 class MainActivity : ComponentActivity() {
     override fun onDestroy() {
         super.onDestroy()
+        // 🔴 onDestroy 在转屏/深色模式/窗口尺寸变化（Activity 重建）时也会触发：
+        //    无 isFinishing 判断会把正在跑的终端会话整组 SIGKILL。
+        if (!isFinishing) return
         // App 退出：整组强杀 proot/ash + 孤儿清扫，杜绝终端运行时进程泄漏（load 累积根因）。
         // destroyForcibly 阻塞最多 3s，放后台线程避免阻塞主线程销毁流程。
         java.util.concurrent.Executors.newSingleThreadExecutor().execute {
