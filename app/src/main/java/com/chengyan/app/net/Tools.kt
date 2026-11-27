@@ -58,14 +58,17 @@ object Tools {
             put("type", "function")
             put("function", buildJsonObject {
                 put("name", "linux")
-                put("description", "操控设备内置的 Linux 环境（busybox 命令集，进程内 ARM64 二进制翻译运行，无 root）。" +
-                    "支持文件读写、文本处理、计算、shell 管道等。AI 自主编排长程任务：run 启动后立即返回，" +
-                    "用 poll 跟踪输出，用 wait 等退出，restart 硬中断。guest 的 / 即持久工作区（App 私有目录，重启保留）；写文件用 `echo 内容 > /a.txt`，读回用 `cat /a.txt`。")
+                put("description", "操控设备内置的 Alpine Linux 3.24 容器（musl libc + busybox 工具集，proot 用户态隔离，无 root）。" +
+                    "注意发行版差异：不是 Ubuntu——①shell 是 busybox ash，没有 bash 数组/[[ ]] 等 bashism，用 POSIX 语法；" +
+                    "②默认没有 curl/python3/git/gcc，下载用 busybox `wget`，需要时 `apk add bash curl python3 gcc` 安装（需网络）；" +
+                    "③busybox ps 输出格式与 procps 不同，查进程用 `ps` 或 `ps w`。支持文件读写、文本处理、管道等。" +
+                    "AI 自主编排长程任务：run 启动后立即返回，用 poll 跟踪输出，用 wait 等退出，restart 硬中断。" +
+                    "guest 的 / 即持久工作区（App 私有目录，重启保留）；写文件用 `echo 内容 > /a.txt`，读回用 `cat /a.txt`。")
                 put("parameters", buildJsonObject {
                     put("type", "object")
                     put("properties", buildJsonObject {
                         put("action", buildJsonObject { put("type", "string"); put("description", "run=启动命令（立即返回）/ poll=查状态与输出 / wait=等退出（限时）/ restart=重建会话 / info=现场自检（so 加载通路、原生窗口、会话句柄、内存）") })
-                        put("command", buildJsonObject { put("type", "string"); put("description", "run 时的 busybox 命令，如 `ls /`、`echo hi > a.txt`、`wc -c a.txt`；支持引号包裹参数" ) })
+                        put("command", buildJsonObject { put("type", "string"); put("description", "run 时的命令（busybox ash 语法，POSIX 而非 bash），如 `ls /`、`echo hi > a.txt`、`wc -c a.txt`；支持引号包裹参数" ) })
                         put("timeout_secs", buildJsonObject { put("type", "number"); put("description", "wait 的最长等待秒数（默认 60，上限 600）" ) })
                     })
                     put("required", buildJsonArray { add(kotlinx.serialization.json.JsonPrimitive("action")) })
