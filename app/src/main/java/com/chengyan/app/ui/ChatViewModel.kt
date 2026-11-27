@@ -32,6 +32,20 @@ class ChatViewModel(
     /** 工具调用之间的间隔：让 AI 的工具执行过程可见、不瞬间刷完（单位 ms）。 */
     private val TOOL_GAP_MS = 320L
 
+    /**
+     * 🔴 流式重组节流：每个 token 都 `current=null;current=c` 会触发 Compose 全量重组，
+     * 长回复+9个工具时每秒数百次重组 → 主线程 ANR（真机已复现）。
+     * 流式期间最多每 80ms 刷新一次；工具完成/流结束等关键点强制刷新。
+     */
+    private var lastUiRefreshMs = 0L
+    private fun refreshUi(c: Conversation, force: Boolean = false) {
+        val now = System.currentTimeMillis()
+        if (force || now - lastUiRefreshMs >= 80) {
+            lastUiRefreshMs = now
+            current = null; current = c
+        }
+    }
+
     // ---- ZorvAI 云模型配置层（完整移植自 Quor-a/ZorvAI core/model） ----
     val quroConfigRepo = com.chengyan.app.core.model.QuroModelConfigRepository(appContext)
     val quroProfileRepo = com.chengyan.app.core.model.QuroSavedProfileRepository(appContext)
@@ -555,7 +569,7 @@ class ChatViewModel(
         c.messages.add(ai)
         streaming = true
         persist()
-        current = null; current = c
+        refreshUi(c, force = true)
 
         streamJob = viewModelScope.launch {
             try {
@@ -572,13 +586,13 @@ class ChatViewModel(
                             is OpenAiClient.StreamEvent.Delta -> {
                                 contentBuf.append(ev.text)
                                 ai.content = contentBuf.toString()
-                                current = null; current = c
+                                refreshUi(c)
                             }
                             is OpenAiClient.StreamEvent.ThinkingDelta -> {
                                 if (ai.thinking.isEmpty()) ai.thinkingMs = 0
                                 ai.thinking += ev.text
                                 ai.thinkingMs = System.currentTimeMillis() - thinkingStart
-                                current = null; current = c
+                                refreshUi(c)
                             }
                             is OpenAiClient.StreamEvent.ToolCallDelta -> {
                                 val tc = pendingCalls.getOrPut(ev.index) {
@@ -587,7 +601,7 @@ class ChatViewModel(
                                 if (!ev.id.isNullOrBlank()) tc.id = ev.id
                                 if (!ev.name.isNullOrBlank()) tc.name = ev.name
                                 tc.result += ev.argsFragment   // 先把参数碎片暂存在 result 字段
-                                current = null; current = c
+                                refreshUi(c)
                             }
                             is OpenAiClient.StreamEvent.Failure -> {
                                 ai.isError = true
@@ -600,7 +614,9 @@ class ChatViewModel(
                     if (!streaming) { cancelled = true } // stop() 取消时 streaming 仍为 true，见 finally；此处以 Job 取消为准
 
                     // 模型没有发起工具调用 → 最终回答完成
-                    if (pendingCalls.isEmpty() || iter >= 6) {
+                    // iter 是「模型往返轮数」不是工具个数：一轮里可含多个 tool_call。
+                    // 9 个工具可能需要多轮往返编排，上限放宽到 16，避免长任务被提前截断。
+                    if (pendingCalls.isEmpty() || iter >= 16) {
                         ai.content = contentBuf.toString().ifBlank { ai.content.ifBlank { "（模型返回了空回复）" } }
                         break
                     }
@@ -626,11 +642,11 @@ class ChatViewModel(
                         // 每完成一个就刷新：工具卡片逐个出现，而不是末尾齐刷
                         ai.toolCalls.add(info)
                         ai.content = contentBuf.toString()
-                        current = null; current = c
+                        refreshUi(c, force = true)
                         if (idx < allCalls.lastIndex) kotlinx.coroutines.delay(TOOL_GAP_MS)
                     }
                     ai.content = contentBuf.toString()
-                    current = null; current = c
+                    refreshUi(c, force = true)
 
                     // 回传本轮全部结果继续生成（tool_calls 与 tool 结果严格一一对应）
                     turns = turns + OpenAiClient.ChatTurn("assistant", contentBuf.toString(), toolCalls =
@@ -645,7 +661,7 @@ class ChatViewModel(
                 streaming = false
                 c.updated = System.currentTimeMillis()
                 persist()
-                current = null; current = c
+                refreshUi(c, force = true)
                 // 自动故障转移（QuroMultiProviderRepository.getNextProvider）：本次失败且未产出内容 → 切到下一个健康提供商并重试一次
                 if (allowFailover && ai.isError && ai.content.startsWith("请求失败") && ai.toolCalls.isEmpty()) {
                     val candidate = failoverCandidate(config.url)
