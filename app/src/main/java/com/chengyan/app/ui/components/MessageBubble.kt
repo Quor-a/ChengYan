@@ -199,10 +199,11 @@ fun MessageBubble(
                 }
             }
 
-            // ── 附图 ──
-            if (message.images.isNotEmpty()) {
+            // ── 附件（图片 / 视频 / 文档 / 音频，用户与 AI 双向）──
+            if (message.images.isNotEmpty() || message.attachments.isNotEmpty()) {
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.padding(start = avatarIndent, bottom = 6.dp)) {
                     message.images.forEach { b64 -> ImageThumb(b64) }
+                    message.attachments.forEach { a -> AttachmentBubble(a) }
                 }
             }
 
@@ -459,4 +460,79 @@ fun StreamingCursor() {
         Modifier.padding(start = 3.dp).size(width = 2.dp, height = 16.dp)
             .background(Accent.copy(alpha = alpha), RoundedCornerShape(1.dp))
     )
+}
+
+/** 消息附件卡片：视频可点播放、文档/文件/音频可点用系统应用打开。 */
+@Composable
+private fun AttachmentBubble(a: com.chengyan.app.data.Attachment) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val hasUri = !a.uri.isNullOrBlank()
+    fun open() {
+        if (!hasUri) return
+        runCatching {
+            val uri = android.net.Uri.parse(a.uri)
+            val mime = a.mime.ifBlank { "*/*" }
+            val intent = android.content.Intent(android.content.Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, mime)
+                addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(intent)
+        }
+    }
+    when (a.type) {
+        "image" -> {
+            if (a.base64 != null) {
+                ImageThumb(a.base64!!)
+            } else if (hasUri) {
+                // 无 coil 依赖：用 ContentResolver 解码本地 URI 显示缩略图
+                val bmp = runCatching {
+                    android.graphics.BitmapFactory.decodeStream(
+                        context.contentResolver.openInputStream(android.net.Uri.parse(a.uri))
+                    )
+                }.getOrNull()
+                if (bmp != null) {
+                    androidx.compose.foundation.Image(
+                        bitmap = bmp.asImageBitmap(),
+                        contentDescription = a.name,
+                        modifier = Modifier
+                            .sizeIn(maxWidth = 200.dp, maxHeight = 200.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .clickable { open() },
+                        contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                    )
+                }
+            }
+        }
+        "video" -> {
+            Surface(shape = RoundedCornerShape(10.dp), color = androidx.compose.ui.graphics.Color(0xFF2A2620),
+                modifier = Modifier.clickable { open() }) {
+                Row(Modifier.padding(horizontal = 12.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text("▶", fontSize = 20.sp, color = androidx.compose.ui.graphics.Color(0xFFD99A5B))
+                    Spacer(Modifier.width(8.dp))
+                    Column {
+                        Text("视频 · ${a.name}", fontSize = 12.sp, color = androidx.compose.ui.graphics.Color(0xFFEDE4D2), maxLines = 1)
+                        Text("${a.size / 1024}KB · 点击播放", fontSize = 10.sp, color = androidx.compose.ui.graphics.Color(0xFFA89C86))
+                    }
+                }
+            }
+        }
+        else -> {
+            Surface(shape = RoundedCornerShape(10.dp), color = Paper3,
+                modifier = Modifier.clickable { open() }) {
+                Row(Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text(if (a.type == "audio") "♪" else "📄", fontSize = 18.sp)
+                    Spacer(Modifier.width(8.dp))
+                    Column {
+                        Text(a.name, fontSize = 12.sp, color = Ink, maxLines = 1)
+                        Text(
+                            "${if (a.type == "audio") "音频" else "文档"} · ${a.size / 1024}KB" +
+                                if (hasUri) " · 点击打开" else " · 已内联",
+                            fontSize = 10.sp, color = Ink2,
+                        )
+                    }
+                }
+            }
+        }
+    }
 }

@@ -29,6 +29,9 @@ class ChatViewModel(
 
     private val client = OpenAiClient()
 
+    /** 工具调用之间的间隔：让 AI 的工具执行过程可见、不瞬间刷完（单位 ms）。 */
+    private val TOOL_GAP_MS = 320L
+
     // ---- ZorvAI 云模型配置层（完整移植自 Quor-a/ZorvAI core/model） ----
     val quroConfigRepo = com.chengyan.app.core.model.QuroModelConfigRepository(appContext)
     val quroProfileRepo = com.chengyan.app.core.model.QuroSavedProfileRepository(appContext)
@@ -370,13 +373,21 @@ class ChatViewModel(
     }
 
     /* ---------- 发送 ---------- */
-    fun send(text: String, images: List<String> = emptyList()) {
+    fun send(
+        text: String,
+        images: List<String> = emptyList(),
+        attachments: List<com.chengyan.app.data.Attachment> = emptyList(),
+    ) {
         if (streaming) return
         if (!config.configured) { _toast.value = "请先在设置中完成模型配置"; return }
         val c = current ?: run { newConversation(); current!! }
         val now = System.currentTimeMillis()
         if (c.messages.isEmpty()) c.title = text.replace("\n", " ").trim().take(18)
-        c.messages.add(Message(com.chengyan.app.data.IdGen.next(), "user", text, now, images = images))
+        c.messages.add(Message(
+            com.chengyan.app.data.IdGen.next(), "user", text, now,
+            images = images,
+            attachments = attachments,
+        ))
         c.updated = now
         request(c, historyUpTo(c, c.messages.lastIndex))
     }
@@ -479,15 +490,28 @@ class ChatViewModel(
                         turns.add(OpenAiClient.ChatTurn("tool", tc.result, toolCallId = tc.id))
                     }
                 } else {
-                    turns.add(OpenAiClient.ChatTurn(m.role, m.content, m.images))
+                    // 结构化附件 → 多模态输入：图片走 data URL，文档文本内联。
+                    val parts = m.attachments.mapNotNull { a ->
+                        when {
+                            a.type == "image" && a.base64 != null ->
+                                OpenAiClient.InputPart("image", "data:${a.mime.ifBlank { "image/jpeg" }};base64,${a.base64}", a.name)
+                            (a.type == "file" || a.type == "text") && !a.text.isNullOrBlank() ->
+                                OpenAiClient.InputPart("file", a.text!!, a.name)
+                            else -> null
+                        }
+                    }
+                    turns.add(OpenAiClient.ChatTurn(m.role, m.content, m.images, parts = parts))
                 }
             }
         }
-        // 图片只保留最近两轮，避免上下文爆炸
+        // 图片/附件只保留最近两轮，避免上下文爆炸
         val cutoff = turns.size - 2
-        val trimmed = turns.mapIndexed { i, t -> if (i < cutoff) t.copy(images = emptyList()) else t }
-        // 上下文预算裁剪（移植自 ZorvAI 上下文压缩思路）：估算 token 超过 contextWindow 时从最旧的消息裁起，system 保留
-        fun estimate(t: OpenAiClient.ChatTurn): Int = t.text.length / 2 + t.images.size * 800
+        val trimmed = turns.mapIndexed { i, t ->
+            if (i < cutoff) t.copy(images = emptyList(), parts = emptyList()) else t
+        }
+        // 上下文预算裁剪：估算 token 超过 contextWindow 时从最旧的消息裁起，system 保留
+        fun estimate(t: OpenAiClient.ChatTurn): Int =
+            t.text.length / 2 + t.images.size * 800 + t.parts.sumOf { it.data.length / 2 + 800 }
         var budget = (config.contextWindow * (quroConfig.contextCompressThreshold.takeIf { it in 1..100 } ?: 80) / 100)
             .coerceAtLeast(4096)
         var used = trimmed.sumOf { estimate(it) }
@@ -581,8 +605,15 @@ class ChatViewModel(
                         break
                     }
 
-                    // 执行每个工具调用（参数已在 result 暂存字段中拼好）
-                    val executed = pendingCalls.values.map { tc ->
+                    // 🔴 工具调用节流：模型可能一轮发起十几个调用。
+                    // 全部执行完再统一刷新 = 「一下子全蹦出来」；且密集同步执行会让主线程卡。
+                    // 改为逐个执行 + 间隔 + 每完成一个立即刷新 UI，用户能看到工具一个个跑完。
+                    // 注意：本轮所有调用必须全部执行 —— OpenAI function calling 协议要求
+                    // assistant.tool_calls 与后续 tool 结果一一对应，漏一个 API 会报错。
+                    val allCalls = pendingCalls.values.toList()
+                    val executed = mutableListOf<com.chengyan.app.data.ToolCallInfo>()
+                    for ((idx, tc) in allCalls.withIndex()) {
+                        if (!streaming) break   // 用户点停止：中断后续调用（此时消息会标记已停止）
                         val args = tc.result
                         val outcome = if (tc.name.startsWith("phone_"))
                             com.chengyan.app.net.PhoneTools.execute(appContext, tc.name, args)
@@ -590,13 +621,18 @@ class ChatViewModel(
                             com.chengyan.app.net.ToolOutcome(com.chengyan.app.net.Tools.execute(tc.name, args))
                         // 手机工具带回的图片（相机/相册）附加到 AI 消息：用户可见，多模态模型下一轮也能看到
                         outcome.imageBase64?.let { b64 -> if (ai.images.size < 4) ai.images = ai.images + b64 }
-                        com.chengyan.app.data.ToolCallInfo(tc.id, tc.name, args, outcome.result)
+                        val info = com.chengyan.app.data.ToolCallInfo(tc.id, tc.name, args, outcome.result)
+                        executed.add(info)
+                        // 每完成一个就刷新：工具卡片逐个出现，而不是末尾齐刷
+                        ai.toolCalls.add(info)
+                        ai.content = contentBuf.toString()
+                        current = null; current = c
+                        if (idx < allCalls.lastIndex) kotlinx.coroutines.delay(TOOL_GAP_MS)
                     }
-                    ai.toolCalls.addAll(executed)
                     ai.content = contentBuf.toString()
                     current = null; current = c
 
-                    // 回传结果继续生成
+                    // 回传本轮全部结果继续生成（tool_calls 与 tool 结果严格一一对应）
                     turns = turns + OpenAiClient.ChatTurn("assistant", contentBuf.toString(), toolCalls =
                         executed.map { OpenAiClient.ToolCallData(it.id, it.name, it.arguments) }) +
                         executed.map { OpenAiClient.ChatTurn("tool", it.result, toolCallId = it.id) }

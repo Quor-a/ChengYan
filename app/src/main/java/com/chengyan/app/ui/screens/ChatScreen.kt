@@ -712,62 +712,38 @@ private fun WelcomeView(config: com.chengyan.app.data.ModelConfig, onSend: (Stri
 @Composable
 private fun ComposerBar(vm: ChatViewModel) {
     var text by remember { mutableStateOf("") }
-    // 引用回复预填：长按消息 → 引用回复 → 输入框填入引用块
     val prefill by vm.composerPrefill.collectAsState()
     LaunchedEffect(prefill) {
-        prefill?.let {
-            text = it
-            vm.composerPrefill.value = null
-        }
+        prefill?.let { text = it; vm.composerPrefill.value = null }
     }
-    var pendingImages by remember { mutableStateOf<List<String>>(emptyList()) }
-    // 🔴 任意文件上传（不限类型）：文本内容内联进消息；图片走视觉 base64；二进制附名称+大小说明
-    var pendingFiles by remember { mutableStateOf<List<String>>(emptyList()) }
+    // 统一附件列表：图片/视频/文档/音频都走 Attachment，发送时一次性交给 VM。
+    var pending by remember { mutableStateOf<List<com.chengyan.app.data.Attachment>>(emptyList()) }
     val context = androidx.compose.ui.platform.LocalContext.current
+
+    fun addUri(uri: android.net.Uri) {
+        val a = com.chengyan.app.data.AttachmentStore.fromUri(context, uri) ?: return
+        if (pending.size < 8) pending = pending + a
+    }
     val pickImage = androidx.activity.compose.rememberLauncherForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia()
-    ) { uri ->
-        if (uri != null) {
-            runCatching {
-                val b64 = readImageAsBase64(context, uri)
-                if (b64 != null && pendingImages.size < 4) pendingImages = pendingImages + b64
-            }
-        }   }
+    ) { uri -> if (uri != null) addUri(uri) }
+    val pickVideo = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.GetContent()
+    ) { uri -> if (uri != null) addUri(uri) }
     val pickFile = androidx.activity.compose.rememberLauncherForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.GetContent()
-    ) { uri ->
-        if (uri != null) {
-            runCatching {
-                val resolver = context.contentResolver
-                val name = runCatching {
-                    resolver.query(uri, null, null, null, null)?.use { c ->
-                        val idx = c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
-                        c.moveToFirst(); if (idx >= 0) c.getString(idx) else null
-                    }
-                }.getOrNull() ?: "file"
-                val mime = resolver.getType(uri) ?: ""
-                if (mime.startsWith("image/")) {
-                    val b64 = readImageAsBase64(context, uri)
-                    if (b64 != null && pendingImages.size < 4) pendingImages = pendingImages + b64
-                } else {
-                    val bytes = resolver.openInputStream(uri)?.use { it.readBytes() }
-                    if (bytes != null) {
-                        val maxBytes = 120_000
-                        val truncated = bytes.size > maxBytes
-                        val slice = if (truncated) bytes.copyOfRange(0, maxBytes) else bytes
-                        val txt = slice.toString(Charsets.UTF_8)
-                        val printable = txt.count { it.isLetterOrDigit() || it.isWhitespace() || ".,:;!?()[]{}<>=+-*/|~'@#$%^&_".contains(it) }.toFloat() / txt.length.coerceAtLeast(1)
-                        pendingFiles = pendingFiles + if (printable > 0.85f) {
-                            "【附件文件：$name${if (truncated) "（内容过长，已截取前 120KB）" else ""}】\n" +
-                                "```\n" + txt + "\n```"
-                        } else {
-                            "【附件文件：$name（${bytes.size / 1024}KB，二进制文件，无法直接读取内容）】"
-                        }
-                    }
-                }
-            }
+    ) { uri -> if (uri != null) addUri(uri) }
+
+    fun doSend() {
+        val imgs = pending.filter { it.type == "image" && it.base64 != null }.map { it.base64!! }
+        val body = (text.trim() + "\n\n" + pending.filter { it.type != "image" }
+            .mapNotNull { it.text }.joinToString("\n\n")).trim()
+        if (body.isNotBlank() || imgs.isNotEmpty()) {
+            vm.send(body.ifBlank { "请看附件" }, imgs, pending)
+            text = ""; pending = emptyList()
         }
     }
+
     Surface(color = MaterialTheme.colorScheme.background) {
         Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
             Surface(
@@ -775,40 +751,14 @@ private fun ComposerBar(vm: ChatViewModel) {
                 border = androidx.compose.foundation.BorderStroke(1.5.dp, Line)
             ) {
                 Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
-                    if (pendingImages.isNotEmpty()) {
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(bottom = 8.dp)) {
-                            pendingImages.forEachIndexed { i, b64 ->
-                                Box {
-                                    Surface(shape = RoundedCornerShape(10.dp), border = androidx.compose.foundation.BorderStroke(1.dp, Line)) {
-                                        androidx.compose.foundation.Image(
-                                            bitmap = decodeBase64Bitmap(b64).asImageBitmap(),
-                                            contentDescription = "待发送图片",
-                                            modifier = Modifier.size(64.dp),
-                                            contentScale = androidx.compose.ui.layout.ContentScale.Crop
-                                        )
-                                    }
-                                    Surface(
-                                        shape = androidx.compose.foundation.shape.CircleShape, color = Ink,
-                                        modifier = Modifier.align(Alignment.TopEnd).padding(3.dp).size(18.dp)
-                                            .clickable { pendingImages = pendingImages.filterIndexed { j, _ -> j != i } }
-                                    ) { Text("×", color = Paper, fontSize = 11.sp, modifier = Modifier.padding(2.dp), textAlign = androidx.compose.ui.text.style.TextAlign.Center) }
-                                }
-                            }
-                        }
-                    }
-                    if (pendingFiles.isNotEmpty()) {
-                        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(bottom = 8.dp),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            pendingFiles.forEachIndexed { i, f ->
-                                Surface(shape = RoundedCornerShape(8.dp), border = androidx.compose.foundation.BorderStroke(1.dp, Line),
-                                    color = Paper3) {
-                                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)) {
-                                        Text("📎 " + f.lineSequence().first().removePrefix("【附件文件：").take(18),
-                                            fontSize = 11.sp, color = Ink2, maxLines = 1)
-                                        Text("×", color = Ink3, fontSize = 12.sp,
-                                            modifier = Modifier.padding(start = 6.dp).clickable { pendingFiles = pendingFiles.filterIndexed { j, _ -> j != i } })
-                                    }
-                                }
+                    // 统一附件预览栏
+                    if (pending.isNotEmpty()) {
+                        Row(
+                            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(bottom = 8.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            pending.forEachIndexed { i, a ->
+                                AttachmentChip(a, onRemove = { pending = pending.filterIndexed { j, _ -> j != i } })
                             }
                         }
                     }
@@ -816,13 +766,8 @@ private fun ComposerBar(vm: ChatViewModel) {
                         value = text, onValueChange = { text = it },
                         textStyle = MaterialTheme.typography.bodyMedium.copy(color = Ink),
                         modifier = Modifier.fillMaxWidth().heightIn(min = 26.dp, max = 150.dp),
-                        keyboardOptions = KeyboardOptions(
-                            imeAction = androidx.compose.ui.text.input.ImeAction.Send
-                        ),
-                        keyboardActions = KeyboardActions(onSend = {
-                            val t = (text.trim() + "\n\n" + pendingFiles.joinToString("\n\n")).trim()
-                            if (t.isNotBlank()) { vm.send(t); text = ""; pendingFiles = emptyList() }
-                        }),
+                        keyboardOptions = KeyboardOptions(imeAction = androidx.compose.ui.text.input.ImeAction.Send),
+                        keyboardActions = KeyboardActions(onSend = { doSend() }),
                         maxLines = 6,
                         decorationBox = { inner ->
                             if (text.isEmpty()) Text("写下你想说的话…", color = Ink3, style = MaterialTheme.typography.bodyMedium)
@@ -833,13 +778,13 @@ private fun ComposerBar(vm: ChatViewModel) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         IconButton(onClick = {
                             pickImage.launch(androidx.activity.result.PickVisualMediaRequest(
-                                androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia.ImageOnly
-                            ))
-                        }) {
-                            Icon(Icons.Rounded.AddPhotoAlternate, "添加图片", tint = Ink3)
+                                androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia.ImageOnly))
+                        }) { Icon(Icons.Rounded.AddPhotoAlternate, "添加图片", tint = Ink3) }
+                        IconButton(onClick = { pickVideo.launch("video/*") }) {
+                            Text("▶", fontSize = 20.sp, color = Ink3)
                         }
                         IconButton(onClick = { pickFile.launch("*/*") }) {
-                            Icon(Icons.Rounded.AttachFile, "添加文件", tint = Ink3)
+                            Icon(Icons.Rounded.AttachFile, "添加文档/文件", tint = Ink3)
                         }
                         Text("Enter 发送", style = MaterialTheme.typography.labelSmall, color = Ink4)
                         Spacer(Modifier.weight(1f))
@@ -848,30 +793,48 @@ private fun ComposerBar(vm: ChatViewModel) {
                             Spacer(Modifier.width(8.dp))
                             FilledTonalIconButton(
                                 onClick = { vm.stop() },
-                                colors = IconButtonDefaults.filledTonalIconButtonColors(
-                                    containerColor = Ink2, contentColor = Paper
-                                )
+                                colors = IconButtonDefaults.filledTonalIconButtonColors(containerColor = Ink2, contentColor = Paper)
                             ) { Icon(Icons.Rounded.Stop, "停止", Modifier.size(18.dp)) }
                         } else {
-                            IconButton(
-                                onClick = {
-                                    val t = (text.trim() + "\n\n" + pendingFiles.joinToString("\n\n")).trim()
-                                    if (t.isNotBlank() || pendingImages.isNotEmpty()) {
-                                        vm.send(t.ifBlank { "请看图回答" }, pendingImages)
-                                        text = ""; pendingFiles = emptyList()
-                                        text = ""; pendingImages = emptyList()
-                                    }
-                                },
-                                enabled = text.isNotBlank() || pendingImages.isNotEmpty()
-                            ) {
+                            IconButton(onClick = { doSend() }, enabled = text.isNotBlank() || pending.isNotEmpty()) {
                                 Icon(Icons.AutoMirrored.Rounded.Send, "发送",
-                                    tint = if (text.isNotBlank() || pendingImages.isNotEmpty()) Accent else Ink4)
+                                    tint = if (text.isNotBlank() || pending.isNotEmpty()) Accent else Ink4)
                             }
                         }
                     }
                 }
             }
         }
+    }
+}
+
+/** 附件预览 chip：图片缩略图、视频/音频图标、文档名称。 */
+@Composable
+private fun AttachmentChip(a: com.chengyan.app.data.Attachment, onRemove: () -> Unit) {
+    Box {
+        Surface(shape = RoundedCornerShape(10.dp), border = androidx.compose.foundation.BorderStroke(1.dp, Line),
+            color = Paper3) {
+            when (a.type) {
+                "image" -> {
+                    if (a.base64 != null) {
+                        androidx.compose.foundation.Image(
+                            bitmap = com.chengyan.app.data.AttachmentStore.decodeBase64Bitmap(a.base64).asImageBitmap(),
+                            contentDescription = a.name, modifier = Modifier.size(64.dp),
+                            contentScale = androidx.compose.ui.layout.ContentScale.Crop)
+                    } else Text("🖼", fontSize = 22.sp, modifier = Modifier.size(64.dp).padding(20.dp))
+                }
+                "video" -> Text("▶", fontSize = 24.sp, modifier = Modifier.size(64.dp).padding(18.dp))
+                "audio" -> Text("♪", fontSize = 24.sp, modifier = Modifier.size(64.dp).padding(18.dp))
+                else -> Column(Modifier.size(64.dp).padding(6.dp), verticalArrangement = Arrangement.Center) {
+                    Text("📄", fontSize = 16.sp)
+                    Text(a.name.take(8), fontSize = 9.sp, color = Ink2, maxLines = 2)
+                }
+            }
+        }
+        Surface(shape = androidx.compose.foundation.shape.CircleShape, color = Ink,
+            modifier = Modifier.align(Alignment.TopEnd).padding(3.dp).size(18.dp).clickable { onRemove() }
+        ) { Text("×", color = Paper, fontSize = 11.sp, modifier = Modifier.padding(2.dp),
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center) }
     }
 }
 

@@ -67,6 +67,28 @@ val DEFAULT_ASSISTANTS = listOf(
     AssistantPreset(5, "头脑风暴", "想", "你是创意顾问。针对用户的问题给出 5 个以上差异化想法，每个附一句理由。"),
 )
 
+/**
+ * 通用附件：图片 / 视频 / 文档 / 音频，用户与 AI 双向收发。
+ *
+ * @param type     "image" | "video" | "file" | "audio"
+ * @param name     展示名（保留原始文件名）
+ * @param mime     MIME 类型，决定 UI 如何渲染与是否可发给多模态模型
+ * @param base64   文件内容（data URL 用；视频/大文件可为 null，仅存 uri）
+ * @param uri      本地持久化 URI（视频/文件用，避免把大文件塞进 JSON）
+ * @param size     字节数
+ * @param text     文档的可读文本（PDF/TXT/MD 等提取后内联给模型）
+ */
+@Serializable
+data class Attachment(
+    val type: String,
+    val name: String,
+    val mime: String = "",
+    val base64: String? = null,
+    val uri: String? = null,
+    val size: Long = 0,
+    val text: String? = null,
+)
+
 @Serializable
 data class Message(
     val id: Long,
@@ -76,7 +98,9 @@ data class Message(
     val model: String? = null,
     var isError: Boolean = false,
     var streaming: Boolean = false,
-    var images: List<String> = emptyList(),   // base64（视觉输入）
+    var images: List<String> = emptyList(),   // base64（视觉输入，旧字段保留兼容）
+    /** 结构化附件（图片/视频/文档/文件/音频），用户与 AI 双向。 */
+    var attachments: List<Attachment> = emptyList(),
     var thinking: String = "",                // 模型思考过程
     var thinkingMs: Long = 0,                 // 思考耗时
     var toolCalls: MutableList<ToolCallInfo> = mutableListOf()  // 本轮的工具调用记录

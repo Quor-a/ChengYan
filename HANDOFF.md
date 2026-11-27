@@ -25,6 +25,23 @@ TerminalScreen (Compose UI，保留原样)
 2. **静态 ET_EXEC 不能做 PIE 门控**：`libbash.so`/`libbusybox.so`/`libloader.so` 都是 e_type=2 无 PT_INTERP，内核 binfmt_elf 直接映射执行；`isPieElf` 误判跳过建链 → exec 不存在的文件 → 终端必死。
 3. **软链失败必须退实体拷贝**：云手机 FUSE FS 不支持 symlink；只 Log+return 会导致 usr/bin/cy-bash 不存在 → 黑屏。
 
+## AI 工具调用（节流）
+`ChatViewModel.request()` 的工具执行循环：**逐个执行 + 320ms 间隔 + 每完成一个立即刷新 UI**。
+原因：模型一轮可能发起十几个 tool_call，原来全同步执行完才刷新 = 「一下子执行太快、全蹦出来」。
+注意：本轮所有调用必须全部执行（OpenAI function calling 协议要求 assistant.tool_calls
+与 tool 结果一一对应，漏一个 API 报错），节流只改执行节奏不改协议结构。
+用户点停止会中断后续调用。
+
+## 多模态附件（图片/视频/文档/文件，双向）
+- `data/Attachment.kt`（在 Models.kt）：统一附件模型 type=image|video|file|audio + name/mime/base64/uri/size/text。
+- `data/AttachmentStore.kt`：URI→附件。图片压 JPEG base64；文本/文档 UTF-8 内联（≤120KB）；
+  视频/音频/二进制复制到 `filesDir/attachments` 持久化存 file:// URI（不塞 JSON）。
+- `ChatViewModel.send(text, images, attachments)` + `historyUpTo`：附件→ChatTurn.parts。
+- `OpenAiClient.ChatTurn.parts` + content 构造：图片走 image_url(data URL)，文档走内联文本块。
+- 输入区图标：图片(PickVisualMedia) / ▶视频(GetContent video/*) / 📎文档(GetContent */*)，统一预览栏可删。
+- 消息气泡 `AttachmentBubble`：图片缩略图、视频卡片(点击系统播放器)、文档卡片(点击打开)。
+- 单测 `AttachmentTypeTest`（5）+ `SessionProtocolTest`（8）共 13 项。
+
 ## 返回导航（全局）
 `MainActivity` 用单一界面栈 `backStack: SnapshotStateList<Route>` 管理所有界面：
 - 根 `CHAT` 永远在栈底；`SETTINGS / PREFS / TERMINAL` 逐层 push。

@@ -44,11 +44,19 @@ class OpenAiClient {
         var result: String = ""
     )
 
+    /**
+     * 多模态输入：给模型的一张图片或一段文档文本。
+     * type="image" → image_url(data URL)；type="file" → 内联文本块。
+     */
+    data class InputPart(val type: String, val data: String, val name: String = "")
+
     /** 一轮对话内容。role 可为 system/user/assistant/tool。 */
     data class ChatTurn(
         val role: String,
         val text: String,
         val images: List<String> = emptyList(),
+        /** 结构化多模态输入（图片/文档），与 images 合并发送。 */
+        val parts: List<InputPart> = emptyList(),
         val toolCalls: List<ToolCallData> = emptyList(),   // assistant 发起的调用
         val toolCallId: String = "",                        // role=tool 时对应的调用 id
     )
@@ -163,7 +171,7 @@ class OpenAiClient {
                             }
                         })
                     })
-                    turn.images.isEmpty() -> add(buildJsonObject {
+                    turn.images.isEmpty() && turn.parts.isEmpty() -> add(buildJsonObject {
                         put("role", turn.role); put("content", turn.text)
                     })
                     else -> add(buildJsonObject {
@@ -175,6 +183,19 @@ class OpenAiClient {
                                     put("type", "image_url")
                                     put("image_url", buildJsonObject { put("url", "data:image/jpeg;base64,$b64") })
                                 })
+                            }
+                            // 结构化附件：图片走 data URL，文档走内联文本块。
+                            turn.parts.forEach { part ->
+                                when (part.type) {
+                                    "image" -> add(buildJsonObject {
+                                        put("type", "image_url")
+                                        put("image_url", buildJsonObject { put("url", part.data) })
+                                    })
+                                    "file", "text" -> add(buildJsonObject {
+                                        put("type", "text")
+                                        put("text", "[附件：${part.name}]\n${part.data}")
+                                    })
+                                }
                             }
                         })
                     })
