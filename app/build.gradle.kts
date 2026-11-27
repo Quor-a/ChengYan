@@ -12,8 +12,19 @@ android {
         applicationId = "com.chengyan.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 12
-        versionName = "1.9.12"
+        versionCode = 13
+        versionName = "1.9.13"
+        // 构建指纹：终端/自检里直接可见，杜绝"装的到底是不是新包"的版本错位问题。
+        // 优先取构建命令注入的 -PBUILD_COMMIT=<远端HEAD>（发布包必须带，与 GitHub main 一一对应）；
+        // 没注入时退回本地 git（开发期）。
+        val _gitShort = (project.findProperty("BUILD_COMMIT") as String?)
+            ?.takeIf { it.isNotBlank() }
+            ?: try {
+                val p = Runtime.getRuntime().exec(arrayOf("git", "-C", rootDir.absolutePath, "rev-parse", "--short", "HEAD"))
+                p.inputStream.bufferedReader().readText().trim().ifEmpty { "unknown" }
+            } catch (_: Exception) { "unknown" }
+        val _ts = System.currentTimeMillis()
+        buildConfigField("String", "BUILD_STAMP", "\"build-$_ts commit-$_gitShort\"")
         // 真 PTY（forkpty）：静态 busybox 直接挂在 PTY 上，不需要 proot。
         externalNativeBuild {
             cmake {
@@ -48,7 +59,7 @@ android {
         cmake { path = file("src/main/cpp/CMakeLists.txt") }
     }
     kotlinOptions { jvmTarget = "17" }
-    buildFeatures { compose = true }
+    buildFeatures { compose = true; buildConfig = true }
     composeOptions { kotlinCompilerExtensionVersion = "1.5.14" }
     packaging {
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
