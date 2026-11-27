@@ -22,13 +22,23 @@ class Pty(
     val stdout: InputStream = FileInputStream(masterFd)
     val stdin: OutputStream = FileOutputStream(masterFd)
 
-    fun isAlive(): Boolean = process.isAlive
+    // 🔴 探活语义修正：kill(pid,0) 对 zombie 也返回成功——旧实现把「已退出未回收」的
+    //    进程当活的，导致 ensure() 不重建、fd 泄漏、终端黑屏。改用 waitpid(WNOHANG) 语义。
+    @Volatile private var reaped = false
+
+    fun isAlive(): Boolean {
+        if (reaped) return false
+        val rc = Companion.waitPidTimeout(pid, 0)   // 0 超时：立即返回，不轮询
+        if (rc == -1) { reaped = true; return false }  // ECHILD：已被回收
+        return rc == -2                                // -2=仍运行；>=0=已死且本次回收
+    }
 
     /** 温和销毁：SIGHUP 整组（线路规程会话断开），关两端 fd，并回收子进程防 zombie。 */
     fun destroy() {
         runCatching { killGroup(pid, 1) }          // SIGHUP → 进程组（含 Alpine 内 sh）
         process.destroy()                           // 兼容原路径：SIGHUP 直达 proot
-        runCatching { Companion.waitPidTimeout(pid, 1500) }
+        val rc = runCatching { Companion.waitPidTimeout(pid, 1500) }.getOrDefault(-2)
+        if (rc != -2) reaped = true
         runCatching { stdout.close() }
         runCatching { stdin.close() }
     }
@@ -42,12 +52,17 @@ class Pty(
         runCatching { killGroup(pid, 9) }          // SIGKILL → 整组
         runCatching { android.os.Process.killProcess(pid) }
         val rc = Companion.waitPidTimeout(pid, 3000)
+        if (rc != -2) reaped = true
         runCatching { stdout.close() }
         runCatching { stdin.close() }
         return rc
     }
 
-    fun waitForExit(timeoutMs: Long): Int = Companion.waitPidTimeout(pid, timeoutMs.toInt())
+    fun waitForExit(timeoutMs: Long): Int {
+        val rc = Companion.waitPidTimeout(pid, timeoutMs.toInt())
+        if (rc != -2) reaped = true
+        return rc
+    }
 
     companion object {
         init {

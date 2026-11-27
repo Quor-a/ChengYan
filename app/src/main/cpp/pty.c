@@ -61,7 +61,7 @@ Java_com_chengyan_app_data_Pty_00024Companion_createSubprocess(JNIEnv *env, jobj
         const char *cwd = (*env)->GetStringUTFChars(env, workingDir, 0);
         if (chdir(cwd) != 0) {
             LOGE("chdir to %s failed", cwd);
-            exit(1);
+            _exit(1);
         }
         (*env)->ReleaseStringUTFChars(env, workingDir, cwd);
 
@@ -89,7 +89,7 @@ Java_com_chengyan_app_data_Pty_00024Companion_createSubprocess(JNIEnv *env, jobj
 
         // execvpe should not return
         LOGE("execvpe failed");
-        exit(1);
+        _exit(1);
     } else { // Parent process
         jintArray result = (*env)->NewIntArray(env, 2);
         if (result == NULL) {

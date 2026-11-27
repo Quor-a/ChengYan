@@ -59,8 +59,8 @@ object Tools {
             put("function", buildJsonObject {
                 put("name", "linux")
                 put("description", "操控设备内置的 Alpine Linux 3.24 容器（musl libc + busybox 工具集，proot 用户态隔离，无 root）。" +
-                    "注意发行版差异：不是 Ubuntu——①shell 是 busybox ash，没有 bash 数组/[[ ]] 等 bashism，用 POSIX 语法；" +
-                    "②默认没有 curl/python3/git/gcc，下载用 busybox `wget`，需要时 `apk add bash curl python3 gcc` 安装（需网络）；" +
+                    "注意发行版差异：不是 Ubuntu——①默认 shell 是 busybox ash；bash 会在首次联网启动时自动安装（终端横幅见 BASH_OK），可用 bash 数组/[[ ]]；" +
+                    "②默认没有 curl/python3/git/gcc，下载用 busybox `wget`，需要时 `apk add python3 gcc` 安装（需网络）；" +
                     "③busybox ps 输出格式与 procps 不同，查进程用 `ps` 或 `ps w`。支持文件读写、文本处理、管道等。" +
                     "AI 自主编排长程任务：run 启动后立即返回，用 poll 跟踪输出，用 wait 等退出，restart 硬中断。" +
                     "guest 的 / 即持久工作区（App 私有目录，重启保留）；写文件用 `echo 内容 > /a.txt`，读回用 `cat /a.txt`。")

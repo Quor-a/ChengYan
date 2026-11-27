@@ -52,6 +52,7 @@ object TtyBridge {
     private var seq = 0L                 // 命令序号，标记自带，防旧标记误匹配
     private val pendingSalt = HashMap<Long, String>()   // seq → 本条命令的哨兵盐
     private val runLock = Any()          // run() 状态机互斥：busy 检查+置位+seq 自增必须原子
+    @Volatile private var startingPid = -1   // 正在启动、尚未成为正式会话的 pty（清扫跳过它）
     private var cmdStartMs = 0L          // 命令起始时间，用于超时兜底
     private const val CMD_TIMEOUT_MS = 600_000L   // 单命令 10 分钟超时兜底
 
@@ -203,7 +204,33 @@ install_alpine(){
     rm -f ${'$'}HOME/${'$'}GUEST
   fi
   echo 'nameserver 8.8.8.8' > ${'$'}GUEST_PATH/etc/resolv.conf 2>/dev/null
+  fetch_bash
   echo PREPARE_DONE
+}
+# 完整 bash：Alpine minirootfs 只有 ash。解压后从官方 CDN 拉 bash + 依赖
+# （readline/ncurses）解入 rootfs，之后 bash 离线可用。无网络时静默跳过。
+fetch_bash(){
+  [ -x "${'$'}GUEST_PATH/bin/bash" ] || [ -x "${'$'}GUEST_PATH/usr/bin/bash" ] && return 0
+  CDN=https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64
+  # 🔴 解析目录页而非 APKINDEX（索引滞后，readline 曾缺失）；文件名规则：包名后紧跟数字
+  #    （排除 -dbg/-dev/-doc/-static）；排序后取最后一个=最新版
+  page=${'$'}(wget -qO- "${'$'}CDN/" 2>/dev/null) || { echo CDN_FAIL; return 0; }
+  for name in bash readline libncursesw ncurses-libs ncurses-terminfo-base; do
+    f=${'$'}(echo "${'$'}page" | grep -o "${'$'}name-[0-9][^\\"<>]*\\.apk" | sort -u | tail -1)
+    [ -n "${'$'}f" ] || continue
+    wget -qO "${'$'}TMPDIR/${'$'}f" "${'$'}CDN/${'$'}f" 2>/dev/null || continue
+    # 🔴 apk 是多段 gzip 拼接（签名+控制+数据），tar xzf 只解第一段必须 gzip -dc | tar
+    gzip -dc "${'$'}TMPDIR/${'$'}f" | busybox tar -x -C "${'$'}GUEST_PATH" 2>/dev/null
+    rm -f "${'$'}TMPDIR/${'$'}f"
+  done
+  if [ -x "${'$'}GUEST_PATH/bin/bash" ]; then
+    echo BASH_OK
+  elif [ -x "${'$'}GUEST_PATH/usr/bin/bash" ]; then
+    ln -sf /usr/bin/bash "${'$'}GUEST_PATH/bin/bash" 2>/dev/null
+    echo BASH_OK
+  else
+    echo BASH_SKIP
+  fi
 }
 """.trimIndent()
         File(filesDir, "common.sh").writeText(script)
@@ -261,7 +288,7 @@ install_alpine(){
             "--bind=${filesDir.absolutePath}:/chengyan",
             "-0", "-w", "/root",
             "/bin/sh", "-c",
-            "echo LOGIN_SUCCESSFUL; echo TERMINAL_READY; exec /bin/sh -l"
+            "echo LOGIN_SUCCESSFUL; echo TERMINAL_READY; if [ -x /bin/bash ]; then exec /bin/bash -l; else exec /bin/sh -l; fi"
         )
         return cmd.toTypedArray()
     }
@@ -301,27 +328,39 @@ install_alpine(){
             // 启动自检：扫杀历史泄漏的 proot/ash 进程（同 uid 可杀），防 load 累积
             val swept = killOrphanRuntimes()
             if (swept > 0) lastError = "self-check: 清理残留运行时进程 $swept 个"
-            if (!prepareGuestRootfs()) return -10L
+        }
+        // 🔴 rootfs 准备（最长 600s 阻塞）移出锁：旧实现持 lock 阻塞数分钟，
+        //    restart/shutdown/其他 run 调用方全部被串行卡死。
+        if (!prepareGuestRootfs()) return -10L
+        synchronized(lock) {
+            // 并发竞态：锁外准备期间另一线程可能已建好会话
+            if (pty != null && pty!!.isAlive()) return 1L
             val env = prootEnv()
             val cmd = buildProotLaunch()
-            val p = try {
+            // 🔴 startingPid 保护：防 init 自检清扫/上一轮 killOrphanRuntimes 误杀新 pty
+            var p = try {
                 Pty.start(cmd, env, filesDir)
             } catch (t: Throwable) {
                 Pty.start(fallback(t.message ?: "forkpty 失败"), env, filesDir)
             }
-            // 600ms 验活：exec 失败/权限受限时立即回落，避免黑屏
-            Thread.sleep(600)
-            if (!p.isAlive()) {
-                val code = runCatching { p.process.exitValue() }.getOrDefault(-1)
-                append("proot 立即退出 exit=$code，回落系统 shell\n")
-                // 🔴 必须强杀整组并等死：SIGHUP 会被 proot 忽略，子进程 reparent 后成泄漏
-                runCatching { p.destroyForcibly() }
-                pty = Pty.start(fallback("proot exit=$code"), env, filesDir)
-            } else {
-                pty = p
+            startingPid = p.pid
+            try {
+                // 600ms 验活：exec 失败/权限受限时立即回落，避免黑屏
+                Thread.sleep(600)
+                if (!p.isAlive()) {
+                    val code = runCatching { p.process.exitValue() }.getOrDefault(-1)
+                    append("proot 立即退出 exit=$code，回落系统 shell\n")
+                    // 🔴 必须强杀整组并等死：SIGHUP 会被 proot 忽略，子进程 reparent 后成泄漏
+                    runCatching { p.destroyForcibly() }
+                    p = Pty.start(fallback("proot exit=$code"), env, filesDir)
+                    startingPid = p.pid
+                }
+            } finally {
+                startingPid = -1
             }
-            append("ChengYan terminal ready (Alpine 3.24 musl + busybox ash, via proot + real PTY)\n")
-            append("[tip] 无 bash/curl：`apk add bash curl python3` 可装；下载用 busybox wget\n")
+            pty = p
+            append("ChengYan terminal ready (Alpine 3.24 musl + bash/ash, via proot + real PTY)\n")
+            append("[tip] 首次联网启动会自动从 Alpine 官方源安装 bash（BASH_OK=成功）；python3/gcc 等用 `apk add` 装；下载用 busybox wget\n")
             append("[build] v1.9.18 (18) · ${com.chengyan.app.BuildConfig.BUILD_STAMP}\n")
             return 1L
         }
@@ -414,9 +453,13 @@ install_alpine(){
     private fun append(s: String) {
         // 原始字节全部进 outBuf：状态机要从中扫描完成标记，绝不能在这里过滤。
         // 显示层（poll 返回 State.output）才剥掉标记回显，UI 形态无需改动。
-        outBuf.append(s)
-        if (outBuf.length > 384 * 1024) outBuf.delete(0, outBuf.length - 384 * 1024)
-        visibleDirty = true
+        // 🔴 synchronized(readLock)：append 的调用方持两把不同的锁（ensure 持 lock、
+        //    poll 持 readLock），旧实现 outBuf 并发 append/toString 是数据竞争。
+        synchronized(readLock) {
+            outBuf.append(s)
+            if (outBuf.length > 384 * 1024) outBuf.delete(0, outBuf.length - 384 * 1024)
+            visibleDirty = true
+        }
     }
 
     /** outBuf 的字符串快照（只在 dirty 后重算，poll 高频调用不能每次 toString 384KB）。 */
@@ -452,7 +495,7 @@ install_alpine(){
         val dirs = procDir.listFiles { f -> f.name.all { it.isDigit() } } ?: return 0
         for (d in dirs) {
             val pid = d.name.toIntOrNull() ?: continue
-            if (pid == android.os.Process.myPid() || pid == livePid) continue
+            if (pid == android.os.Process.myPid() || pid == livePid || pid == startingPid) continue
             val cmdline = runCatching {
                 File(d, "cmdline").readBytes().toString(Charsets.UTF_8).replace('\u0000', ' ')
             }.getOrDefault("")
