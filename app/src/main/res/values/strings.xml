@@ -1,3 +1,5 @@
 <resources>
     <string name="app_name">澄言</string>
+    <string name="a11y_service_label">澄言屏幕服务</string>
+    <string name="a11y_service_desc">允许澄言读取当前屏幕文本并执行返回/主页等全局操作，供 AI 助手理解屏幕内容。不会收集或上传任何屏幕数据。</string>
 </resources>

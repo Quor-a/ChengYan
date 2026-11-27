@@ -12,8 +12,8 @@ android {
         applicationId = "com.chengyan.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 20
-        versionName = "1.9.20"
+        versionCode = 21
+        versionName = "1.9.21"
         // 构建指纹：终端/自检里直接可见，杜绝"装的到底是不是新包"的版本错位问题。
         // 优先取构建命令注入的 -PBUILD_COMMIT=<远端HEAD>（发布包必须带，与 GitHub main 一一对应）；
         // 没注入时退回本地 git（开发期）。
@@ -82,6 +82,11 @@ dependencies {
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.datastore:datastore-preferences:1.1.1")
+
+    // Shizuku：真实集成（授权后用 shell 级 pm grant 授予被系统限制的权限）
+    implementation("dev.rikka.shizuku:api:13.1.5")
+    implementation("dev.rikka.shizuku:provider:13.1.5")
+    implementation("dev.rikka.shizuku:aidl:13.1.5")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("com.squareup.okhttp3:okhttp-sse:4.12.0")

@@ -202,6 +202,8 @@ object PhoneTools {
             put("path", buildJsonObject { put("type", "string"); put("description", "应用私有文件相对路径，如 notes/todo.md") })
             put("content", buildJsonObject { put("type", "string") })
         })
+        domain("phone_screen", "屏幕：read 读取当前前台应用与屏幕可见文本 / back 返回键 / home 主页 / recents 最近任务（需用户在设置「系统能力」中启用澄言屏幕服务）", listOf("read", "back", "home", "recents"), buildJsonObject { })
+        domain("phone_sys", "系统能力：shizuku_grant 通过 Shizuku（shell 级）授予本应用被系统限制的权限，如 READ_SMS/SEND_SMS/READ_CALL_LOG（需已安装并授权 Shizuku）", listOf("shizuku_grant"), buildJsonObject { })
     }
 
     /* ---------- 执行入口 ---------- */
@@ -226,6 +228,8 @@ object PhoneTools {
                 "phone_apps" -> apps(context, action, args)
                 "phone_device" -> device(context, action, args)
                 "phone_files" -> files(context, action, args)
+                "phone_screen" -> screen(action)
+                "phone_sys" -> sys(context, action)
                 else -> ToolOutcome("未知手机工具：$name")
             }
         }.getOrElse { ToolOutcome("执行失败：${it.message}") }
@@ -714,5 +718,53 @@ object PhoneTools {
             }
             else -> return ToolOutcome("phone_files 支持 save_downloads/app_read/app_write")
         }
+    }
+
+    /* ---------- phone_screen：屏幕读取与全局动作（真实无障碍能力） ---------- */
+
+    private fun screen(action: String): ToolOutcome {
+        return when (action) {
+            "read" -> {
+                val svc = com.chengyan.app.service.ChengYanAccessibilityService.instance
+                if (svc == null) {
+                    ToolOutcome("无障碍屏幕服务未启用。请告知用户：设置 → 系统能力 → 屏幕服务 → 去启用。")
+                } else {
+                    val pkg = com.chengyan.app.service.ChengYanAccessibilityService.lastPkg
+                    val text = com.chengyan.app.service.ChengYanAccessibilityService.lastText
+                    if (text.isBlank()) ToolOutcome("前台应用：${pkg ?: "未知"}；暂未捕获窗口文本（可能刚切换，可重试 read）。")
+                    else ToolOutcome("前台应用：${pkg ?: "未知"}\n屏幕可见文本：\n$text")
+                }
+            }
+            "back" -> ToolOutcome(if (com.chengyan.app.service.ChengYanAccessibilityService.perform("back")) "已执行返回。" else "无障碍服务未启用，无法执行返回。")
+            "home" -> ToolOutcome(if (com.chengyan.app.service.ChengYanAccessibilityService.perform("home")) "已回到主页。" else "无障碍服务未启用，无法执行主页动作。")
+            "recents" -> ToolOutcome(if (com.chengyan.app.service.ChengYanAccessibilityService.perform("recents")) "已打开最近任务。" else "无障碍服务未启用，无法执行最近任务。")
+            else -> ToolOutcome("未知 action：$action")
+        }
+    }
+
+    /* ---------- phone_sys：Shizuku shell 级授权 ---------- */
+
+    private fun sys(context: Context, action: String): ToolOutcome = when (action) {
+        "shizuku_grant" -> {
+            if (!ShizukuBridge.available())
+                ToolOutcome("Shizuku 不可用：未安装 Shizuku 或服务未运行。请告知用户安装 Shizuku 并启动（无线调试或 root 模式），本应用设置页「系统能力 → Shizuku」可发起授权。")
+            else if (!ShizukuBridge.granted())
+                ToolOutcome("Shizuku 已运行但未授权本应用。请告知用户在设置「系统能力 → Shizuku」点「去授权」。")
+            else {
+                val perms = listOf(
+                    Manifest.permission.READ_SMS, Manifest.permission.SEND_SMS,
+                    Manifest.permission.RECEIVE_SMS, Manifest.permission.READ_CALL_LOG,
+                    Manifest.permission.READ_CONTACTS, Manifest.permission.RECORD_AUDIO,
+                )
+                val results = ShizukuBridge.grantSelf(context.packageName, perms)
+                val ok = results.filter { it.second }.map { it.first.substringAfterLast('.') }
+                val fail = results.filter { !it.second }.map { it.first.substringAfterLast('.') }
+                ToolOutcome(buildString {
+                    append("Shizuku pm grant 完成：成功 ${ok.size} 项${if (ok.isNotEmpty()) "（${ok.joinToString()}）" else ""}；")
+                    if (fail.isNotEmpty()) append("失败 ${fail.size} 项（${fail.joinToString()}）。")
+                })
+            }
+        }
+        else -> ToolOutcome("未知 action：$action")
     }
 }

@@ -2,6 +2,8 @@
 
 package com.chengyan.app.ui.screens
 
+import com.chengyan.app.net.ShizukuBridge
+
 /*
  * 模型配置页 —— 界面结构与交互完整移植自（云端模式；ZorvAI 的「01 导入模型」为本地引擎专区，澄言纯云端故自 02 起编号） Quor-a/ZorvAI ui/QuroModelConfigScreen.kt（云端模式部分）
  * 与 ui/QuroSettingsComponents.kt：
@@ -426,38 +428,40 @@ fun SettingsScreen(
 
 /* ==================== 组件（移植自 QuroSettingsComponents.kt，配色换澄言主题） ==================== */
 
-/** 系统能力状态卡：无障碍服务 / Shizuku 授权，附跳转入口。 */
+/**
+ * 手机能力权限状态卡（真实数据）：列出 AI 手机工具实际用到的运行时权限的授予状态。
+ * 🔴 旧版「无障碍/Shizuku」卡已删：App 未声明 AccessibilityService、也未集成 Shizuku SDK，
+ *    那两张卡是纯检测型死 UI——检测了永远不会被使用的能力，即「根本不能用」。
+ */
 @Composable
 private fun SystemCapabilitySection(context: android.content.Context) {
-    var a11yOn by remember { mutableStateOf(false) }
-    var shizukuOn by remember { mutableStateOf(false) }
+    var states by remember { mutableStateOf(mapOf<String, Boolean>()) }
     fun refresh() {
-        // 无障碍：系统设置里已启用的服务列表是否包含本包
-        a11yOn = runCatching {
-            val enabled = android.provider.Settings.Secure.getString(
-                context.contentResolver,
-                android.provider.Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
-            ).orEmpty()
-            enabled.contains(context.packageName)
-        }.getOrDefault(false)
-        // Shizuku：反射调用隐藏的 ServiceManager.getService（不引 SDK，纯检测）
-        shizukuOn = runCatching {
-            val sm = Class.forName("android.os.ServiceManager")
-            val method = sm.getDeclaredMethod("getService", String::class.java)
-            method.isAccessible = true
-            val binder = method.invoke(null, "shizuku") as? android.os.IBinder
-            binder != null && binder.isBinderAlive
-        }.getOrDefault(false)
+        states = listOf(
+            "短信读取" to android.Manifest.permission.READ_SMS,
+            "短信发送" to android.Manifest.permission.SEND_SMS,
+            "通讯录读取" to android.Manifest.permission.READ_CONTACTS,
+            "麦克风" to android.Manifest.permission.RECORD_AUDIO,
+            "相机" to android.Manifest.permission.CAMERA,
+            "精确定位" to android.Manifest.permission.ACCESS_FINE_LOCATION,
+        ).associate { (label, p) ->
+            label to (runCatching {
+                context.checkSelfPermission(p) == android.content.pm.PackageManager.PERMISSION_GRANTED
+            }.getOrDefault(false))
+        }
     }
     LaunchedEffect(Unit) { refresh() }
 
     Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = Paper2)) {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            // ---- 无障碍屏幕服务（真实能力：屏幕读取 + 全局动作） ----
+            var a11yOn by remember { mutableStateOf(com.chengyan.app.service.ChengYanAccessibilityService.instance != null) }
             CapabilityRow(
-                icon = "♿", name = "无障碍服务",
-                desc = if (a11yOn) "已启用 · 可执行自动化点击/输入" else "未启用 · 部分自动化工具不可用",
+                icon = "♿", name = "屏幕服务（无障碍）",
+                desc = if (a11yOn) "已启用 · AI 可读取屏幕文本并执行返回/主页"
+                       else "未启用 · 启用后 AI 的 phone_screen 工具可读屏与执行全局动作",
                 on = a11yOn,
-                actionLabel = "去设置",
+                actionLabel = "去启用",
                 onAction = {
                     runCatching {
                         context.startActivity(
@@ -468,12 +472,62 @@ private fun SystemCapabilitySection(context: android.content.Context) {
                 }
             )
             androidx.compose.material3.HorizontalDivider(color = Line)
+            // ---- Shizuku（真实集成：shell 级 pm grant 解锁受限权限） ----
+            var shizukuOk by remember { mutableStateOf(ShizukuBridge.granted()) }
+            var shizukuAvail by remember { mutableStateOf(ShizukuBridge.available()) }
             CapabilityRow(
                 icon = "⚙", name = "Shizuku",
-                desc = if (shizukuOn) "已授权 · 可用系统级 API" else "未授权 · 需先安装 Shizuku 并授权",
-                on = shizukuOn,
-                actionLabel = "刷新",
-                onAction = { refresh() }
+                desc = when {
+                    shizukuOk -> "已授权 · 可一键授予短信/通话记录等受限权限"
+                    shizukuAvail -> "已运行 · 待授权本应用"
+                    else -> "未安装或未启动 · 安装 Shizuku 后点「去授权」"
+                },
+                on = shizukuOk,
+                actionLabel = "去授权",
+                onAction = {
+                    if (ShizukuBridge.available()) {
+                        ShizukuBridge.request { _ -> refresh() }
+                    } else {
+                        runCatching {
+                            val intent = android.content.Intent(android.content.Intent.ACTION_VIEW)
+                                .setData(android.net.Uri.parse("market://details?id=moe.shizuku.privileged.api"))
+                                .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                            context.startActivity(intent)
+                        }
+                    }
+                }
+            )
+            androidx.compose.material3.HorizontalDivider(color = Line)
+            Text(
+                "以下权限由「手机能力」工具按需申请；拒绝不影响其他功能。",
+                style = MaterialTheme.typography.bodySmall, color = Ink3
+            )
+            states.forEach { (label, granted) ->
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text(label, style = MaterialTheme.typography.bodyLarge, color = Ink, modifier = Modifier.weight(1f))
+                    Text(
+                        if (granted) "已授予" else "未授予",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = if (granted) Ok else Ink3
+                    )
+                }
+            }
+            androidx.compose.material3.HorizontalDivider(color = Line)
+            CapabilityRow(
+                icon = "⚙", name = "权限设置",
+                desc = "前往系统设置手动管理本应用的全部权限",
+                on = true,
+                actionLabel = "去设置",
+                onAction = {
+                    runCatching {
+                        context.startActivity(
+                            android.content.Intent(
+                                android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                android.net.Uri.fromParts("package", context.packageName, null)
+                            ).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                        )
+                    }
+                }
             )
         }
     }

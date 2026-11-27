@@ -1,24 +1,22 @@
 package com.chengyan.app.ui.screens
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextStyle
@@ -30,7 +28,6 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.chengyan.app.data.LinuxBridge
-import com.chengyan.app.ui.components.monoSafe
 import com.chengyan.app.ui.theme.FontCJK
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -38,34 +35,25 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * 终端视觉（澄言原创，v1.9.19 重设计）：暖墨三层次深色 + 陶土橙强调。
- * 相对旧版：①输出真彩色渲染（SGR 前景色/加粗解析，不再剥掉颜色）；②顶栏加
- * Alpine 徽标与指纹行；③快捷键改胶囊芯片；④输入行加提示符底座与圆形发送键。
+ * 终端视觉（v1.9.21 重设计，参考真实终端模拟器形态）：
+ * 全屏平铺、无卡片/无圆角浮块/无彩色胶囊——只有背景、文字、发丝分隔线。
+ * 一切元素等宽字体；唯一的强调色是陶土橙（提示符与路径）。
+ * 无障碍：所有可点区域 ≥48dp、带 contentDescription、文字随系统 fontScale。
  */
 private object TermTheme {
-    val Page = Color(0xFF14110E)          // 页面最底
-    val Panel = Color(0xFF1E1913)         // 输出面板
-    val PanelHi = Color(0xFF2C261F)       // 芯片/徽章底
-    val Border = Color(0xFF3A3228)        // 描边
-    val Fg = Color(0xFFEDE4D2)            // 主文字
-    val FgDim = Color(0xFFA89C86)         // 次文字
-    val Prompt = Color(0xFFD99A5B)        // 提示符/强调橙
-    val Ok = Color(0xFF8FBF7A)            // 运行中绿
-    val Err = Color(0xFFE07A5F)           // 错误红
-    val KeyBg = Color(0xFF332C22)         // 芯片底
-    val KeyFg = Color(0xFFC9BDA8)         // 芯片字
-    val DangerBg = Color(0xFF4A2A22)      // 危险操作底
-    val Accent = Color(0xFFC96F3B)        // 发送键
-    // ANSI 8+8 色映射（暖色化，与主题同族）
+    val Bg = Color(0xFF171310)            // 全屏底（更深、更平）
+    val BgAlt = Color(0xFF1F1A15)         // 功能行底（快捷键/输入行）
+    val Line = Color(0xFF332C24)          // 发丝分隔线
+    val Fg = Color(0xFFE9E0CE)            // 输出主文字
+    val FgDim = Color(0xFF9C9080)         // 次文字
+    val Prompt = Color(0xFFD99A5B)        // 提示符/强调
+    val Ok = Color(0xFF8FBF7A)
+    val Err = Color(0xFFE07A5F)
+    val KeyFg = Color(0xFFC9BDA8)
+    // ANSI 8+8 色（暖色化）
     val Ansi = listOf(
-        Color(0xFF5A5044), // 30 black
-        Color(0xFFE07A5F), // 31 red
-        Color(0xFF8FBF7A), // 32 green
-        Color(0xFFD9B45B), // 33 yellow
-        Color(0xFF7FA6C9), // 34 blue
-        Color(0xFFC9A0B8), // 35 magenta
-        Color(0xFF7FBFB0), // 36 cyan
-        Color(0xFFEDE4D2), // 37 white
+        Color(0xFF5A5044), Color(0xFFE07A5F), Color(0xFF8FBF7A), Color(0xFFD9B45B),
+        Color(0xFF7FA6C9), Color(0xFFC9A0B8), Color(0xFF7FBFB0), Color(0xFFE9E0CE),
     )
     val AnsiBright = listOf(
         Color(0xFF8A8069), Color(0xFFF0957A), Color(0xFFA8D68F), Color(0xFFE8CC7A),
@@ -73,10 +61,8 @@ private object TermTheme {
     )
 }
 
-/**
- * Linux 终端：Alpine Linux 3.24 用户空间 + 真 PTY。
- * 逻辑骨架（ensure IO/150ms poll/贴底节流/历史）为已验证形态，仅视觉层重写。
- */
+private val Mono = FontFamily.Monospace
+
 @Composable
 fun TerminalScreen(onBack: () -> Unit) {
     var input by remember { mutableStateOf("") }
@@ -85,12 +71,10 @@ fun TerminalScreen(onBack: () -> Unit) {
     var error by remember { mutableStateOf<String?>(null) }
     var follow by remember { mutableStateOf(true) }
     var clearAt by remember { mutableStateOf(0) }
-    var probeOut by remember { mutableStateOf<String?>(null) }
-    val ctx = androidx.compose.ui.platform.LocalContext.current
     val outScroll = rememberScrollState()
     val scope = rememberCoroutineScope()
 
-    // ensure 有解压 rootfs(waitFor 600s)+forkpty+sleep，阻塞 → IO 线程，否则 ANR。
+    // ensure 有解压 rootfs(最长 600s)+forkpty，阻塞 → IO 线程。
     LaunchedEffect(Unit) {
         val r = withContext(Dispatchers.IO) {
             runCatching { LinuxBridge.ensure() }.getOrElse {
@@ -100,7 +84,7 @@ fun TerminalScreen(onBack: () -> Unit) {
         }
         if (r <= 0) error = LinuxBridge.lastError.ifBlank { "会话启动失败（$r）" }
     }
-    // 150ms 轮询：poll 读 PTY + 扫状态机，切 IO 避免大输出卡主线程。
+    // 150ms 轮询读 PTY，切 IO。
     LaunchedEffect(Unit) {
         while (true) {
             delay(150)
@@ -119,7 +103,7 @@ fun TerminalScreen(onBack: () -> Unit) {
         }
     }
     LaunchedEffect(st.output.length, follow) {
-        // scrollTo（非 animate）：动画会在输出稳定后仍连续重组，触摸时抢主线程 → ANR。
+        // scrollTo（非 animate）：动画会连续重组抢主线程。
         if (follow) outScroll.scrollTo(outScroll.maxValue)
     }
 
@@ -141,165 +125,135 @@ fun TerminalScreen(onBack: () -> Unit) {
     Column(
         Modifier
             .fillMaxSize()
-            .background(TermTheme.Page)
+            .background(TermTheme.Bg)
             .statusBarsPadding()
             .navigationBarsPadding()
     ) {
-        // ---------- 顶栏：返回 · 标题+指纹 · Alpine 徽标 · 状态 ----------
+        // ---------- 标题行：真实终端标签页形态 ----------
         Row(
             Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 10.dp),
+                .height(48.dp)
+                .padding(horizontal = 4.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Row(
-                Modifier.clickable { onBack() }.padding(end = 6.dp, top = 4.dp, bottom = 4.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text("‹", color = TermTheme.FgDim, fontSize = 22.sp, fontFamily = FontCJK)
-                Text("返回", color = TermTheme.FgDim, fontSize = 13.sp, fontFamily = FontCJK)
-            }
-            Spacer(Modifier.width(8.dp))
-            Column {
+            Text(
+                "‹", color = TermTheme.FgDim, fontSize = 20.sp, fontFamily = Mono,
+                modifier = Modifier
+                    .size(48.dp)
+                    .clickable { onBack() }
+                    .wrapContentHeight(Alignment.CenterVertically)
+                    .semantics { contentDescription = "返回上一页" }
+            )
+            Column(Modifier.weight(1f).padding(start = 2.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("●", color = TermTheme.Prompt, fontSize = 9.sp, fontFamily = FontFamily.Monospace)
-                    Spacer(Modifier.width(5.dp))
-                    Text(
-                        "Terminal", color = TermTheme.Fg, fontSize = 16.sp,
-                        fontWeight = FontWeight.SemiBold, fontFamily = FontFamily.Monospace
-                    )
+                    Text("chengyan", color = TermTheme.Fg, fontSize = 13.sp, fontFamily = Mono, fontWeight = FontWeight.SemiBold)
+                    Text("@localhost", color = TermTheme.FgDim, fontSize = 13.sp, fontFamily = Mono)
+                    Text(" ~", color = TermTheme.Prompt, fontSize = 13.sp, fontFamily = Mono)
                 }
                 Text(
                     com.chengyan.app.BuildConfig.BUILD_STAMP,
-                    color = TermTheme.FgDim, fontSize = 9.sp, fontFamily = FontFamily.Monospace,
-                    modifier = Modifier.padding(start = 14.dp, top = 1.dp)
+                    color = TermTheme.FgDim, fontSize = 9.sp, fontFamily = Mono, lineHeight = 11.sp
                 )
             }
-            Spacer(Modifier.weight(1f))
-            // Alpine 徽标
-            Surface(
-                color = TermTheme.PanelHi,
-                shape = RoundedCornerShape(6.dp),
-                modifier = Modifier.border(1.dp, TermTheme.Border, RoundedCornerShape(6.dp))
+            // 状态：终端模拟器的纯文本指示灯
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.padding(end = 10.dp)
             ) {
+                Box(
+                    Modifier.size(8.dp).background(
+                        if (st.busy) TermTheme.Ok else TermTheme.Prompt,
+                        androidx.compose.foundation.shape.CircleShape
+                    )
+                )
+                Spacer(Modifier.width(6.dp))
                 Text(
-                    "ALPINE 3.24", color = TermTheme.KeyFg, fontSize = 9.sp,
-                    fontFamily = FontFamily.Monospace, letterSpacing = 1.sp,
-                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                    if (st.busy) "RUN" else "RDY",
+                    color = if (st.busy) TermTheme.Ok else TermTheme.FgDim,
+                    fontSize = 11.sp, fontFamily = Mono, letterSpacing = 1.sp
                 )
             }
-            Spacer(Modifier.width(8.dp))
-            StatusBadge(running = st.busy, exit = st.exit)
         }
+        Box(Modifier.fillMaxWidth().height(1.dp).background(TermTheme.Line))
 
-        // ---------- 输出区（真彩色 ANSI 渲染） ----------
-        Box(Modifier.weight(1f).fillMaxWidth().padding(horizontal = 10.dp)) {
-            Surface(
-                color = TermTheme.Panel,
-                shape = RoundedCornerShape(14.dp),
+        // ---------- 输出：全屏平铺文本，无容器 ----------
+        Box(Modifier.weight(1f).fillMaxWidth()) {
+            val from = clearAt.coerceAtMost(st.output.length)
+            val window = st.output.drop(from).let { if (it.length > 12_000) it.takeLast(12_000) else it }
+            val rendered = remember(window) { renderAnsi(window) }
+            Text(
+                rendered.ifBlank { motd() },
+                fontSize = 12.sp,
+                lineHeight = 17.sp,
+                color = TermTheme.Fg,
+                fontFamily = Mono,
                 modifier = Modifier
                     .fillMaxSize()
-                    .border(1.dp, TermTheme.Border, RoundedCornerShape(14.dp))
-            ) {
-                val from = clearAt.coerceAtMost(st.output.length)
-                // 只渲染尾部窗口：3 万字符的 Text 测量/布局在主线程是重活（真机 ANR 帮凶）。
-                // remember 缓存 rendered：只有 window 真变化才重跑 ANSI 解析。
-                val window = st.output.drop(from).let { if (it.length > 12_000) it.takeLast(12_000) else it }
-                val rendered = remember(window) { renderAnsi(window) }
-                val text = if (probeOut != null)
-                    buildAnnotatedString {
-                        withStyle(SpanStyle(color = TermTheme.FgDim, fontFamily = FontFamily.Monospace, fontSize = 12.sp)) {
-                            append(probeOut ?: "")
-                        }
-                        append("\n\n")
-                        append(rendered)
-                    } else rendered
-                val body = if (text.isBlank()) welcomeBanner() else text
-                Text(
-                    body,
-                    fontSize = 12.5.sp,
-                    lineHeight = 19.sp,
-                    color = TermTheme.Fg,
-                    fontFamily = FontFamily.Monospace,
-                    modifier = Modifier
-                        .verticalScroll(outScroll)
-                        .padding(horizontal = 14.dp, vertical = 14.dp)
-                )
-            }
-            // 未跟随时的「回到底部」悬浮按钮
+                    .verticalScroll(outScroll)
+                    .padding(horizontal = 10.dp, vertical = 10.dp)
+                    .semantics { contentDescription = "终端输出区" }
+            )
             if (!follow) {
-                Surface(
-                    onClick = { follow = true },
-                    shape = CircleShape,
-                    color = TermTheme.Accent,
-                    shadowElevation = 6.dp,
+                Text(
+                    "⤓ 最新",
+                    color = Color(0xFF171310),
+                    fontSize = 12.sp,
+                    fontFamily = Mono,
+                    fontWeight = FontWeight.SemiBold,
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
-                        .padding(bottom = 12.dp)
-                        .size(36.dp)
-                ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Text("↓", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
-                    }
-                }
-            }
-        }
-
-        // ---------- 错误条 ----------
-        error?.let {
-            Surface(
-                color = TermTheme.DangerBg,
-                shape = RoundedCornerShape(8.dp),
-                modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp).fillMaxWidth()
-            ) {
-                Text(
-                    "⚠ $it", color = TermTheme.Err, fontSize = 11.5.sp, fontFamily = FontCJK,
-                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                        .padding(bottom = 10.dp)
+                        .background(TermTheme.Prompt)
+                        .clickable { follow = true }
+                        .padding(horizontal = 12.dp, vertical = 8.dp)
+                        .semantics { contentDescription = "滚动到最新输出" }
                 )
             }
         }
+        Box(Modifier.fillMaxWidth().height(1.dp).background(TermTheme.Line))
 
-        // ---------- 快捷键（胶囊芯片行） ----------
+        // ---------- 错误条（平铺一行，不是浮卡） ----------
+        error?.let {
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .background(Color(0xFF2E1A14))
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("! ", color = TermTheme.Err, fontSize = 12.sp, fontFamily = Mono, fontWeight = FontWeight.Bold)
+                Text(it, color = TermTheme.Err, fontSize = 11.sp, fontFamily = FontCJK)
+            }
+        }
+
+        // ---------- 快捷键：终端附件条（紧凑方块，等宽字体） ----------
         Row(
             Modifier
                 .fillMaxWidth()
                 .horizontalScroll(rememberScrollState())
-                .padding(horizontal = 12.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(7.dp)
+                .background(TermTheme.BgAlt)
+                .padding(horizontal = 4.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            QuickKey("清屏") { clearAt = st.output.length }
-            QuickKey("Tab") { input += "    " }
-            QuickKey("↑") {
+            TermKey("清屏", fg = TermTheme.KeyFg) { clearAt = st.output.length }
+            TermKey("Tab", fg = TermTheme.KeyFg) { input += "    " }
+            TermKey("↑", fg = TermTheme.KeyFg) {
                 if (history.isNotEmpty()) {
                     histIdx = if (histIdx == -1) history.size - 1 else (histIdx - 1).coerceAtLeast(0)
                     input = history.getOrNull(histIdx) ?: input
                 }
             }
-            QuickKey("↓") {
+            TermKey("↓", fg = TermTheme.KeyFg) {
                 if (history.isNotEmpty() && histIdx >= 0) {
                     histIdx++
                     input = history.getOrNull(histIdx) ?: ""
                     if (histIdx >= history.size) histIdx = -1
                 }
             }
-            QuickKey("^C") { LinuxBridge.interrupt() }
-            QuickKey("自检") { error = LinuxBridge.diag() }
-            QuickKey("探针") {
-                probeOut = "探测中…"
-                // IO 线程跑探针，结果回主线程写 Compose 状态（子线程写状态不稳）。
-                scope.launch {
-                    val result = withContext(Dispatchers.IO) {
-                        runCatching {
-                            com.chengyan.app.data.FdosProbe.summarize(
-                                com.chengyan.app.data.FdosProbe.run(ctx)
-                            )
-                        }.getOrElse { "探针失败：${it.message}" }
-                    }
-                    probeOut = result
-                }
-            }
-            QuickKey("重建", danger = true) {
+            TermKey("^C", fg = TermTheme.Err) { LinuxBridge.interrupt() }
+            TermKey("自检", fg = TermTheme.KeyFg) { error = LinuxBridge.diag() }
+            TermKey("重建", fg = TermTheme.Err) {
                 scope.launch(Dispatchers.IO) {
                     LinuxBridge.restart()
                     clearAt = 0
@@ -307,156 +261,125 @@ fun TerminalScreen(onBack: () -> Unit) {
             }
         }
 
-        // ---------- 输入行：提示符底座 + 圆形发送键 ----------
-        Surface(
-            color = TermTheme.Panel,
-            shape = RoundedCornerShape(14.dp),
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 10.dp)
-                .border(1.dp, TermTheme.Border, RoundedCornerShape(14.dp))
-        ) {
-            Row(
-                Modifier.fillMaxWidth().padding(start = 4.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Surface(
-                    color = TermTheme.KeyBg,
-                    shape = RoundedCornerShape(8.dp),
-                    modifier = Modifier.padding(start = 8.dp)
-                ) {
-                    Text(
-                        "$", color = TermTheme.Prompt, fontFamily = FontFamily.Monospace,
-                        fontSize = 14.sp, fontWeight = FontWeight.Bold,
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
-                    )
-                }
-                Spacer(Modifier.width(8.dp))
-                BasicTextField(
-                    value = input,
-                    onValueChange = { input = it },
-                    singleLine = true,
-                    textStyle = TextStyle(color = TermTheme.Fg, fontFamily = monoSafe(input), fontSize = 14.sp),
-                    cursorBrush = SolidColor(TermTheme.Prompt),
-                    modifier = Modifier.weight(1f),
-                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-                    keyboardActions = KeyboardActions(onSend = { send(input); input = "" }),
-                    decorationBox = { inner ->
-                        Box {
-                            if (input.isEmpty()) Text("输入命令…", color = TermTheme.FgDim, fontSize = 13.sp, fontFamily = FontCJK)
-                            inner()
-                        }
-                    }
-                )
-                Spacer(Modifier.width(6.dp))
-                Surface(
-                    onClick = { send(input); input = "" },
-                    shape = CircleShape,
-                    color = TermTheme.Accent,
-                    modifier = Modifier.size(36.dp)
-                ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Text("▶", color = Color.White, fontSize = 13.sp)
-                    }
-                }
-            }
-        }
-    }
-}
-
-/** 空态欢迎卡（内嵌式，不再是假输出）。 */
-private fun welcomeBanner(): AnnotatedString = buildAnnotatedString {
-    withStyle(SpanStyle(color = TermTheme.Prompt, fontSize = 16.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.SemiBold)) {
-        append("ChengYan Terminal\n")
-    }
-    withStyle(SpanStyle(color = TermTheme.FgDim, fontSize = 11.sp, fontFamily = FontFamily.Monospace)) {
-        append("Alpine Linux 3.24 · aarch64 · musl · 真 PTY 会话\n")
-        append("proot 用户态隔离 · bash/ash 可用\n\n")
-    }
-    withStyle(SpanStyle(color = TermTheme.KeyFg, fontSize = 12.sp, fontFamily = FontCJK)) {
-        append("输入命令回车执行，例如：")
-    }
-    withStyle(SpanStyle(color = TermTheme.Prompt, fontSize = 12.sp, fontFamily = FontFamily.Monospace)) {
-        append("ls /  ·  bash --version  ·  apk --version")
-    }
-}
-
-/** 状态徽章：运行中（绿点+绿字）/ 就绪（橙点+灰字）。 */
-@Composable
-private fun StatusBadge(running: Boolean, exit: Int?) {
-    val dot = if (running) TermTheme.Ok else TermTheme.Prompt
-    val text = when {
-        running -> "RUN"
-        exit != null -> "RDY·$exit"
-        else -> "RDY"
-    }
-    val fg = if (running) TermTheme.Ok else TermTheme.FgDim
-    Surface(
-        color = TermTheme.PanelHi,
-        shape = RoundedCornerShape(20.dp),
-        modifier = Modifier.border(1.dp, TermTheme.Border, RoundedCornerShape(20.dp))
-    ) {
+        // ---------- 输入行：与输出同构的终端行（提示符 + 输入） ----------
         Row(
-            Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
+            Modifier
+                .fillMaxWidth()
+                .background(TermTheme.BgAlt)
+                .heightIn(min = 52.dp)
+                .padding(horizontal = 4.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            Box(Modifier.size(7.dp).background(dot, CircleShape))
-            Text(text, color = fg, fontSize = 10.5.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Medium)
+            Text(
+                "#", color = TermTheme.Prompt, fontSize = 14.sp, fontFamily = Mono,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(start = 8.dp)
+            )
+            Text(
+                " ", fontSize = 14.sp, fontFamily = Mono
+            )
+            BasicTextField(
+                value = input,
+                onValueChange = { input = it },
+                singleLine = true,
+                textStyle = TextStyle(color = TermTheme.Fg, fontFamily = Mono, fontSize = 14.sp, lineHeight = 18.sp),
+                cursorBrush = SolidColor(TermTheme.Prompt),
+                modifier = Modifier
+                    .weight(1f)
+                    .heightIn(min = 48.dp)
+                    .wrapContentHeight(Alignment.CenterVertically)
+                    .semantics { contentDescription = "命令输入框" },
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                keyboardActions = KeyboardActions(onSend = { send(input); input = "" }),
+                decorationBox = { inner ->
+                    Box(Modifier.wrapContentHeight(Alignment.CenterVertically)) {
+                        if (input.isEmpty()) Text(
+                            "type a command…", color = TermTheme.FgDim, fontSize = 13.sp, fontFamily = Mono
+                        )
+                        inner()
+                    }
+                }
+            )
+            Text(
+                "⏎", color = TermTheme.KeyFg, fontSize = 18.sp, fontFamily = Mono,
+                modifier = Modifier
+                    .size(48.dp)
+                    .clickable { send(input); input = "" }
+                    .wrapContentHeight(Alignment.CenterVertically)
+                    .semantics { contentDescription = "执行命令" }
+            )
         }
     }
 }
 
-@Composable
-private fun QuickKey(label: String, danger: Boolean = false, onClick: () -> Unit) {
-    val bg = if (danger) TermTheme.DangerBg else TermTheme.KeyBg
-    val fg = if (danger) TermTheme.Err else TermTheme.KeyFg
-    Surface(
-        onClick = onClick,
-        shape = RoundedCornerShape(20.dp),
-        color = bg,
-        modifier = Modifier.border(1.dp, if (danger) TermTheme.Err.copy(alpha = 0.4f) else TermTheme.Border, RoundedCornerShape(20.dp))
-    ) {
-        Text(
-            label, fontSize = 12.sp, color = fg, fontFamily = FontCJK,
-            fontWeight = FontWeight.Medium,
-            modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp)
-        )
+/** 空态 motd：真实登录横幅形态。 */
+private fun motd(): AnnotatedString = buildAnnotatedString {
+    withStyle(SpanStyle(color = TermTheme.FgDim, fontSize = 12.sp, fontFamily = Mono)) {
+        append("Welcome to ChengYan terminal (Alpine 3.24, aarch64)\n")
+        append("Kernel-type musl · shell bash/ash · real PTY via proot\n\n")
     }
+    withStyle(SpanStyle(color = TermTheme.Fg, fontSize = 12.sp, fontFamily = Mono)) {
+        append("* 文档: ")
+    }
+    withStyle(SpanStyle(color = TermTheme.Prompt, fontSize = 12.sp, fontFamily = Mono)) {
+        append("ls / · bash --version · apk --version\n")
+    }
+    withStyle(SpanStyle(color = TermTheme.FgDim, fontSize = 12.sp, fontFamily = Mono)) {
+        append("* 首次联网启动自动安装 bash；python3 用 apk add")
+    }
+}
+
+/** 快捷键方块：46-48dp 触控目标，等宽字，无圆角浮块。 */
+@Composable
+private fun RowScope.TermKey(label: String, fg: Color, onClick: () -> Unit) {
+    Text(
+        label,
+        color = fg,
+        fontSize = 12.sp,
+        fontFamily = Mono,
+        fontWeight = FontWeight.Medium,
+        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+        modifier = Modifier
+            .size(width = 52.dp, height = 48.dp)
+            .clickable(onClick = onClick)
+            .wrapContentHeight(Alignment.CenterVertically)
+            .semantics { contentDescription = "快捷键 $label" }
+    )
 }
 
 /**
- * 输出渲染：解析 ANSI CSI 序列——SGR 前景色（30-37/90-97）与加粗映射为
- * AnnotatedString 样式（真彩色终端），其余序列（OSC/光标控制等）剥除。
+ * 输出渲染：SGR 前景色/加粗 → AnnotatedString 真彩色；其余序列剥除。
+ * 协议噪音行（LOGIN_SUCCESSFUL/TERMINAL_READY）不进入显示层。
  */
 private fun renderAnsi(out: String): AnnotatedString {
-    val sb = buildAnnotatedString {
+    // 先滤掉协议标记行
+    val cleaned = out.replace(Regex("(?m)^(LOGIN_SUCCESSFUL|TERMINAL_READY|PREPARE_DONE)\\s*$"), "")
+    return buildAnnotatedString {
         var color: Color? = null
         var bold = false
         var i = 0
-        fun flushSpan(text: String) {
-            if (text.isEmpty()) return
-            val style = SpanStyle(
+        val plain = StringBuilder()
+        fun flush() {
+            if (plain.isEmpty()) return
+            withStyle(SpanStyle(
                 color = color ?: TermTheme.Fg,
                 fontWeight = if (bold) FontWeight.SemiBold else null
-            )
-            withStyle(style) { append(text) }
+            )) { append(plain.toString()) }
+            plain.setLength(0)
         }
-        val plain = StringBuilder()
-        while (i < out.length) {
-            val c = out[i]
+        while (i < cleaned.length) {
+            val c = cleaned[i]
             if (c == '\u001B') {
-                // 先落袋当前纯文本段
-                flushSpan(plain.toString()); plain.setLength(0)
+                flush()
                 i++
                 when {
-                    i < out.length && out[i] == '[' -> {
+                    i < cleaned.length && cleaned[i] == '[' -> {
                         i++
                         val params = StringBuilder()
-                        while (i < out.length && out[i].code in 0x20..0x3F) { params.append(out[i]); i++ }
-                        val final = if (i < out.length) out[i] else ' '; if (i < out.length) i++
+                        while (i < cleaned.length && cleaned[i].code in 0x20..0x3F) { params.append(cleaned[i]); i++ }
+                        val final = if (i < cleaned.length) cleaned[i] else ' '
+                        if (i < cleaned.length) i++
                         if (final == 'm') {
-                            // SGR：解析前景色与加粗（按 ; 分段，空段视为 0）
                             val ps = params.toString().ifBlank { "0" }
                             for (seg in ps.split(';')) {
                                 when (seg.trim().toIntOrNull()) {
@@ -471,23 +394,21 @@ private fun renderAnsi(out: String): AnnotatedString {
                             }
                         }
                     }
-                    i < out.length && out[i] == ']' -> {
-                        // OSC 到 BEL 或 ST
+                    i < cleaned.length && cleaned[i] == ']' -> {
                         i++
-                        while (i < out.length) {
-                            if (out[i] == '\u0007') { i++; break }
-                            if (out[i] == '\u001B' && i + 1 < out.length && out[i + 1] == '\\') { i += 2; break }
+                        while (i < cleaned.length) {
+                            if (cleaned[i] == '\u0007') { i++; break }
+                            if (cleaned[i] == '\u001B' && i + 1 < cleaned.length && cleaned[i + 1] == '\\') { i += 2; break }
                             i++
                         }
                     }
-                    i < out.length && out[i].code in 0x40..0x5F -> i++
+                    i < cleaned.length && cleaned[i].code in 0x40..0x5F -> i++
                 }
             } else {
                 plain.append(c)
                 i++
             }
         }
-        flushSpan(plain.toString())
+        flush()
     }
-    return sb
 }
