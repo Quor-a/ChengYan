@@ -12,8 +12,8 @@ android {
         applicationId = "com.chengyan.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 16
-        versionName = "1.9.16"
+        versionCode = 17
+        versionName = "1.9.17"
         // 构建指纹：终端/自检里直接可见，杜绝"装的到底是不是新包"的版本错位问题。
         // 优先取构建命令注入的 -PBUILD_COMMIT=<远端HEAD>（发布包必须带，与 GitHub main 一一对应）；
         // 没注入时退回本地 git（开发期）。

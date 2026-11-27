@@ -321,7 +321,7 @@ install_alpine(){
                 pty = p
             }
             append("ChengYan terminal ready (Alpine 3.24 + proot + real PTY)\n")
-            append("[build] v1.9.16 (16) · ${com.chengyan.app.BuildConfig.BUILD_STAMP}\n")
+            append("[build] v1.9.17 (17) · ${com.chengyan.app.BuildConfig.BUILD_STAMP}\n")
             return 1L
         }
     }
@@ -509,7 +509,7 @@ install_alpine(){
 
     fun diag(): String = buildString {
         appendLine("runtime=Alpine Linux 3.24 rootfs + proot + real PTY")
-        appendLine("[build] v1.9.16 (16) · ${com.chengyan.app.BuildConfig.BUILD_STAMP}")
+        appendLine("[build] v1.9.17 (17) · ${com.chengyan.app.BuildConfig.BUILD_STAMP}")
         appendLine("rootfs=${File(usrDir, "var/lib/proot-distro/installed-rootfs/alpine").absolutePath}")
         appendLine("tarball=${File(filesDir, ALPINE_FILENAME).let { "${it.exists()} ${it.length()}" }}")
         appendLine("cyBash=${File(binDir, "cy-bash").let { "${it.exists()} ${it.canExecute()}" }}")

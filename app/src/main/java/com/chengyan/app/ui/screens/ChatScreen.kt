@@ -486,10 +486,16 @@ private fun ConversationDrawer(
             )
         }
         Spacer(Modifier.height(8.dp))
-        Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp)) {
-            val filtered = conversations.distinctBy { it.id }.sortedByDescending { it.updated }
+        // 🔴 LazyColumn：旧 Column+verticalScroll 无复用，会话多时全部 item 一次性组合
+        val filtered = remember(conversations, searchQuery) {
+            conversations.distinctBy { it.id }.sortedByDescending { it.updated }
                 .filter { searchQuery.isBlank() || it.title.contains(searchQuery, ignoreCase = true) }
-            var lastGroup by remember { mutableStateOf("") }
+        }
+        androidx.compose.foundation.lazy.LazyColumn(
+            Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            var lastGroup = ""
             filtered.forEach { c ->
                 val age = System.currentTimeMillis() - c.updated
                 val group = when {
@@ -500,8 +506,11 @@ private fun ConversationDrawer(
                 }
                 if (group != lastGroup) {
                     lastGroup = group
-                    Text(group, fontSize = 12.sp, color = Ink4, modifier = Modifier.padding(top = 12.dp, bottom = 4.dp))
+                    item(key = "hdr_$group") {
+                        Text(group, fontSize = 12.sp, color = Ink4, modifier = Modifier.padding(top = 8.dp, bottom = 2.dp))
+                    }
                 }
+                item(key = c.id) {
                 val active = c.id == currentId
                 Row(
                     Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
@@ -525,11 +534,14 @@ private fun ConversationDrawer(
                         Icon(Icons.Filled.Delete, "删除", Modifier.size(18.dp), tint = Ink4)
                     }
                 }
+                }
             }
             if (filtered.isEmpty()) {
-                Text("没有匹配的对话", fontSize = 13.sp, color = Ink4,
-                    modifier = Modifier.fillMaxWidth().padding(vertical = 24.dp),
-                    textAlign = TextAlign.Center)
+                item(key = "empty") {
+                    Text("没有匹配的对话", fontSize = 13.sp, color = Ink4,
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 24.dp),
+                        textAlign = TextAlign.Center)
+                }
             }
         }
     }
