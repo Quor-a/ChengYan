@@ -513,7 +513,10 @@ private fun ConversationDrawer(
                         Text(c.title.takeIf { it.isNotBlank() && it != "null" } ?: "新对话", fontSize = 14.sp,
                             color = Ink, fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
                             maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        val sub = c.messages.lastOrNull()?.content?.replace("\n", " ")
+                        // 🔴 remember：流式每 tick 对全部会话各分配一个 replace 子串
+                        val sub = remember(c.id, c.messages.size, c.messages.lastOrNull()?.content?.length) {
+                            c.messages.lastOrNull()?.content?.replace("\n", " ")
+                        }
                         if (sub != null) Text(sub, fontSize = 12.sp, color = Ink4, maxLines = 1,
                             overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 2.dp))
                     }
@@ -591,6 +594,7 @@ private fun ChatArea(vm: ChatViewModel, modifier: Modifier = Modifier, onEdit: (
 
     // 智能滚动：流式输出时自动贴底跟随；用户向上滑动即停止跟随；↓ 或手动滚回底部恢复跟随
     val autoFollow = remember { mutableStateOf(true) }
+    var lastFollowScrollMs by remember { mutableStateOf(0L) }
     // 用户在流式跟随期间向上滑动 → 立即停止跟随（方向侦测，不用等滚动停下）
     LaunchedEffect(listState) {
         var lastFirst = listState.firstVisibleItemIndex
@@ -610,7 +614,11 @@ private fun ChatArea(vm: ChatViewModel, modifier: Modifier = Modifier, onEdit: (
     // 流式跟随：只要跟随开启，内容增长就无条件贴底（可见项计数在快速流式下不可靠，
     // 旧逻辑"距底部超过2条就不动"导致跟随卡死且 ↓ 永不出现——本次修正）
     LaunchedEffect(msgs.size, msgs.lastOrNull()?.content?.length) {
-        if (autoFollow.value && msgs.isNotEmpty() && listState.layoutInfo.totalItemsCount > 0) {
+        // 🔴 贴底节流 ≥150ms：流式时 key 每 80ms 变，逐 tick 强制整列表重布局是重组风暴的一部分
+        val now = System.currentTimeMillis()
+        if (autoFollow.value && msgs.isNotEmpty() && listState.layoutInfo.totalItemsCount > 0 &&
+            now - lastFollowScrollMs >= 150) {
+            lastFollowScrollMs = now
             listState.scrollToItem(listState.layoutInfo.totalItemsCount - 1, SCROLL_BOTTOM_OFFSET)
         }
     }
@@ -622,8 +630,9 @@ private fun ChatArea(vm: ChatViewModel, modifier: Modifier = Modifier, onEdit: (
     Box(modifier) {
         LazyColumn(state = listState, contentPadding = PaddingValues(top = 8.dp, bottom = 16.dp, start = 14.dp, end = 14.dp),
             modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            // 🔴 外提：原来每个 item lambda 内 O(n) 扫一遍 msgs（整体 O(n²)/次重组）
+            val lastAiIdx = msgs.indexOfLast { it.role != "user" }
             itemsIndexed(msgs, key = { i, m -> "msg_${m.id}_$i" }) { i, m ->
-                val lastAiIdx = msgs.indexOfLast { it.role != "user" }
                 MessageBubble(
                     message = m,
                     // ZorvAI showActions 门控：只在最后一条 AI 消息且本轮已结束时平铺操作行
@@ -833,8 +842,11 @@ private fun AttachmentChip(a: com.chengyan.app.data.Attachment, onRemove: () -> 
             when (a.type) {
                 "image" -> {
                     if (a.base64 != null) {
+                        // 🔴 remember：ComposerBar 每次重组（每敲一个字/每流式 tick）不再重复
+                        //    Base64+BitmapFactory 解码整图（主线程可达数 MB 位图分配）
+                        val bmp = remember(a.base64) { com.chengyan.app.data.AttachmentStore.decodeBase64Bitmap(a.base64).asImageBitmap() }
                         androidx.compose.foundation.Image(
-                            bitmap = com.chengyan.app.data.AttachmentStore.decodeBase64Bitmap(a.base64).asImageBitmap(),
+                            bitmap = bmp,
                             contentDescription = a.name, modifier = Modifier.size(64.dp),
                             contentScale = androidx.compose.ui.layout.ContentScale.Crop)
                     } else Text("🖼", fontSize = 22.sp, modifier = Modifier.size(64.dp).padding(20.dp))

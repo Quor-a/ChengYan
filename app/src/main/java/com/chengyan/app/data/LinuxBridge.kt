@@ -42,8 +42,11 @@ object LinuxBridge {
     fun poll(): State {
         val p = TtyBridge.poll()
         val prev = _flow.value
+        // 🔴 先做引用相等（可见缓存未变时是同一 String 实例，零成本），
+        //    避免每 150ms 对最长 384KB 的输出做全文 equals。
         if (prev.busy == p.busy && prev.exit == p.exit &&
-            prev.outputLen == p.outputLen && prev.output == p.output) {
+            prev.outputLen == p.outputLen &&
+            (prev.output === p.output || prev.output == p.output)) {
             return prev
         }
         val s = State(p.busy, p.exit, p.output, p.outputLen)

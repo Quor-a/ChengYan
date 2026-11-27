@@ -3,6 +3,7 @@ package com.chengyan.app.net
 import com.chengyan.app.data.ModelConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.channels.trySendBlocking
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.flowOn
@@ -65,6 +66,8 @@ class OpenAiClient {
         config: ModelConfig,
         history: List<ChatTurn>,
     ): Flow<StreamEvent> = callbackFlow {
+        // 🔴 丢字修复见下方 onEvent：trySend 改 trySendBlocking（默认 channel 容量 64，
+        //    消费慢时 trySend 静默失败 → 长回复掉 token）
         val body = buildJsonObject {
             put("model", config.model)
             put("stream", true)
@@ -94,7 +97,7 @@ class OpenAiClient {
         var es: EventSource? = null
         es = EventSources.createFactory(client).newEventSource(request, object : EventSourceListener() {
             override fun onEvent(es: EventSource, id: String?, type: String?, data: String) {
-                if (data == "[DONE]") { trySend(StreamEvent.Done); close(); return }
+                if (data == "[DONE]") { trySendBlocking(StreamEvent.Done); close(); return }
                 runCatching {
                     val obj = json.parseToJsonElement(data) as? kotlinx.serialization.json.JsonObject ?: return
                     val delta = obj["choices"]?.let { c ->
@@ -106,20 +109,20 @@ class OpenAiClient {
                     val thinking = (delta["reasoning_content"] ?: delta["reasoning"])?.let {
                         (it as? kotlinx.serialization.json.JsonPrimitive)?.content
                     }
-                    if (!thinking.isNullOrEmpty()) trySend(StreamEvent.ThinkingDelta(thinking))
+                    if (!thinking.isNullOrEmpty()) trySendBlocking(StreamEvent.ThinkingDelta(thinking))
 
                     // 正文
                     val content = delta["content"]?.let {
                         (it as? kotlinx.serialization.json.JsonPrimitive)?.content
                     }
-                    if (!content.isNullOrEmpty()) trySend(StreamEvent.Delta(content))
+                    if (!content.isNullOrEmpty()) trySendBlocking(StreamEvent.Delta(content))
 
                     // 工具调用增量
                     (delta["tool_calls"] as? kotlinx.serialization.json.JsonArray)?.forEach { el ->
                         val tc = el as? kotlinx.serialization.json.JsonObject ?: return@forEach
                         val idx = (tc["index"] as? kotlinx.serialization.json.JsonPrimitive)?.content?.toIntOrNull() ?: 0
                         val fn = tc["function"] as? kotlinx.serialization.json.JsonObject
-                        trySend(StreamEvent.ToolCallDelta(
+                        trySendBlocking(StreamEvent.ToolCallDelta(
                             index = idx,
                             id = (tc["id"] as? kotlinx.serialization.json.JsonPrimitive)?.content,
                             name = fn?.get("name")?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content },
@@ -136,11 +139,11 @@ class OpenAiClient {
                     t?.message?.contains("cleartext") == true -> "明文 HTTP 被系统拦截：本地服务请使用 10.0.2.2（模拟器）或配置网络安全策略"
                     else -> t?.message ?: "未知网络错误"
                 }
-                trySend(StreamEvent.Failure(msg))
+                trySendBlocking(StreamEvent.Failure(msg))
                 close()
             }
             override fun onClosed(es: EventSource) {
-                trySend(StreamEvent.Done); close()
+                trySendBlocking(StreamEvent.Done); close()
             }
         })
         awaitClose { es?.cancel() }
@@ -223,15 +226,19 @@ class OpenAiClient {
                     return b.get().build()
                 }
                 val resp = client.newCall(req(url)).execute()
-                var text = resp.body?.string().orEmpty()
-                if (!resp.isSuccessful && !likelyOllama && base.contains("localhost") || !resp.isSuccessful && base.contains("127.0.0.1")) {
-                    // 回环地址回退 Ollama 格式
-                    client.newCall(req("$base/api/tags")).execute().use { r2 ->
-                        if (r2.isSuccessful) text = r2.body?.string().orEmpty() else throw IllegalStateException("HTTP ${resp.code}: ${text.take(200)}")
+                // 🔴 use{}：响应体必须关闭，否则连接池泄漏
+                var text = ""
+                resp.use { r ->
+                    text = r.body?.string().orEmpty()
+                    if (!r.isSuccessful && !likelyOllama && (base.contains("localhost") || base.contains("127.0.0.1"))) {
+                        // 回环地址回退 Ollama 格式（🔴 原条件 &&/|| 优先级错误，非回环失败也走此分支）
+                        client.newCall(req("$base/api/tags")).execute().use { r2 ->
+                            if (r2.isSuccessful) text = r2.body?.string().orEmpty() else throw IllegalStateException("HTTP ${r.code}: ${text.take(200)}")
+                        }
+                    } else if (!r.isSuccessful) {
+                        throw IllegalStateException("HTTP ${r.code}: ${text.take(200)}")
                     }
-                } else if (!resp.isSuccessful) {
-                    throw IllegalStateException("HTTP ${resp.code}: ${text.take(200)}")
-                }
+                } // resp.use
 
                 if (text.contains("\"models\"") && !text.contains("\"object\":\"list\"")) {
                     // Ollama /api/tags：{"models":[{"name":"..","...}]}

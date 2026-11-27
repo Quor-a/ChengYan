@@ -50,6 +50,8 @@ object TtyBridge {
     @Volatile private var busy = false
     @Volatile private var lastExit: Int? = null
     private var seq = 0L                 // 命令序号，标记自带，防旧标记误匹配
+    private val pendingSalt = HashMap<Long, String>()   // seq → 本条命令的哨兵盐
+    private val runLock = Any()          // run() 状态机互斥：busy 检查+置位+seq 自增必须原子
     private var cmdStartMs = 0L          // 命令起始时间，用于超时兜底
     private const val CMD_TIMEOUT_MS = 600_000L   // 单命令 10 分钟超时兜底
 
@@ -319,30 +321,35 @@ install_alpine(){
                 pty = p
             }
             append("ChengYan terminal ready (Alpine 3.24 + proot + real PTY)\n")
-            append("[build] v1.9.15 (15) · ${com.chengyan.app.BuildConfig.BUILD_STAMP}\n")
+            append("[build] v1.9.16 (16) · ${com.chengyan.app.BuildConfig.BUILD_STAMP}\n")
             return 1L
         }
     }
 
     fun run(cmd: String): Long {
         if (pty == null && ensure() <= 0) return -10L
-        // 上一条命令还没收到完成标记：拒绝新命令（UI 已有 -3 提示）。
-        // 常驻 shell 若并发写两条命令，两条的 $? 标记会交错 → 状态机错乱。
-        if (busy) { lastError = "上一条命令尚未完成"; return -3L }
-        val id = ++seq
-        return try {
-            // 哨兵协议：命令照原样交给 shell，尾部追加一条只回显退出码的 printf。
-            //   <cmd>; __cy_rc=$?; printf '\\n__CY_DONE_<id>_%d__\\n' "$__cy_rc"
-            // 用中间变量存 $?，避免 printf 自身改写退出码；标记带 id 防历史输出误匹配。
-            val line = SessionProtocol.wrap(cmd, id)
-            pty!!.stdin.write(line.toByteArray())
-            pty!!.stdin.flush()
-            busy = true
-            cmdStartMs = System.currentTimeMillis()
-            id
-        } catch (e: Throwable) {
-            lastError = "写入失败：${e.message}"
-            -10L
+        // 🔴 busy 检查+置位+seq 自增原子化：旧实现两线程（终端 UI + AI 工具循环）可同时通过
+        //    if (busy)，两条命令的哨兵标记交错 → 状态机错乱。
+        synchronized(runLock) {
+            if (busy) { lastError = "上一条命令尚未完成"; return -3L }
+            val id = ++seq
+            return try {
+                // 哨兵协议：命令照原样交给 shell，尾部追加一条只回显退出码的 printf。
+                //   <cmd>; __cy_rc=$?; printf '\n__CY_DONE_<id>_<salt>_%d__\n' "$__cy_rc"
+                // salt 为随机数：防业务输出（cat/echo）恰好含标记字符串造成假完成。
+                val salt = Integer.toHexString(java.util.concurrent.ThreadLocalRandom.current().nextInt(0x100000))
+                pendingSalt[id] = salt
+                val line = SessionProtocol.wrap(cmd, id, salt)
+                pty!!.stdin.write(line.toByteArray())
+                pty!!.stdin.flush()
+                busy = true
+                cmdStartMs = System.currentTimeMillis()
+                id
+            } catch (e: Throwable) {
+                pendingSalt.remove(id)
+                lastError = "写入失败：${e.message}"
+                -10L
+            }
         }
     }
 
@@ -367,10 +374,11 @@ install_alpine(){
             val snapshot = rawSnapshot()
             // 扫描累积输出里的完成标记：只认当前序号，命中即翻转状态。
             if (busy) {
-                val hit = SessionProtocol.exitCodeOf(snapshot, seq)
+                val hit = SessionProtocol.exitCodeOf(snapshot, seq, pendingSalt[seq].orEmpty())
                 if (hit != null) {
                     lastExit = hit
                     busy = false
+                    pendingSalt.remove(seq)
                 } else if (System.currentTimeMillis() - cmdStartMs > CMD_TIMEOUT_MS) {
                     // 超时兜底：命令卡死（等待输入/网络）时不能让 busy 永远为真，
                     // 否则 UI 一直「运行中」、工具的 wait 永远等下去。
@@ -501,7 +509,7 @@ install_alpine(){
 
     fun diag(): String = buildString {
         appendLine("runtime=Alpine Linux 3.24 rootfs + proot + real PTY")
-        appendLine("[build] v1.9.15 (15) · ${com.chengyan.app.BuildConfig.BUILD_STAMP}")
+        appendLine("[build] v1.9.16 (16) · ${com.chengyan.app.BuildConfig.BUILD_STAMP}")
         appendLine("rootfs=${File(usrDir, "var/lib/proot-distro/installed-rootfs/alpine").absolutePath}")
         appendLine("tarball=${File(filesDir, ALPINE_FILENAME).let { "${it.exists()} ${it.length()}" }}")
         appendLine("cyBash=${File(binDir, "cy-bash").let { "${it.exists()} ${it.canExecute()}" }}")
@@ -510,7 +518,7 @@ install_alpine(){
         appendLine("ptyAlive=${pty?.isAlive() == true}")
         appendLine("--- 会话状态机 ---")
         appendLine("busy=$busy lastExit=$lastExit seq=$seq rawLen=${outBuf.length}")
-        appendLine("markerHit=${SessionProtocol.exitCodeOf(outBuf.toString(), seq) != null}")
+        appendLine("markerHit=${SessionProtocol.exitCodeOf(outBuf.toString(), seq, pendingSalt[seq].orEmpty()) != null}")
         appendLine("lastError=$lastError")
     }
 

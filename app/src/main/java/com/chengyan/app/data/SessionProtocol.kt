@@ -14,21 +14,24 @@ package com.chengyan.app.data
  */
 object SessionProtocol {
 
-    private val MARKER = Regex("""__CY_DONE_(\d+)_(-?\d+)__""")
-
-    /** 构造写入 PTY 的命令行。 */
-    fun wrap(cmd: String, id: Long): String =
-        "$cmd ; __cy_rc=\$? ; printf '\\n__CY_DONE_${id}_%d__\\n' \"\$__cy_rc\"\n"
+    private val MARKER = Regex("""__CY_DONE_(\d+)_(\w+)_(-?\d+)__""")
 
     /**
-     * 从累积输出里找指定序号的完成标记，返回退出码；没有则返回 null。
+     * 构造写入 PTY 的命令行。salt 为本次命令随机数：
+     * 防止业务输出恰好含 __CY_DONE_<当前id>_<数字>__ 被误判为完成标记（cat/echo 即可撞上）。
+     */
+    fun wrap(cmd: String, id: Long, salt: String): String =
+        "$cmd ; __cy_rc=\$? ; printf '\\n__CY_DONE_${id}_${salt}_%d__\\n' \"\$__cy_rc\"\n"
+
+    /**
+     * 从累积输出里找指定序号+盐的完成标记，返回退出码；没有则返回 null。
      * 累积扫描（不是只看最新一块）：标记可能被 PTY 拆到多次 read。
      */
-    fun exitCodeOf(output: String, id: Long): Int? {
+    fun exitCodeOf(output: String, id: Long, salt: String): Int? {
         var found: Int? = null
         MARKER.findAll(output).forEach { m ->
-            if (m.groupValues[1].toLongOrNull() == id) {
-                found = m.groupValues[2].toIntOrNull()
+            if (m.groupValues[1].toLongOrNull() == id && m.groupValues[2] == salt) {
+                found = m.groupValues[3].toIntOrNull()
             }
         }
         return found

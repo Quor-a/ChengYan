@@ -280,12 +280,15 @@ private fun CodeBlock(lang: String, code: String) {
 @Composable
 private fun HtmlPreview(code: String, modifier: Modifier = Modifier) {
     val ctx = androidx.compose.ui.platform.LocalContext.current
-    // 稳定缓存文件名（内容哈希），避免每次重组重复写盘
+    // 稳定缓存文件名（内容哈希），避免每次重组重复写盘。
+    // 🔴 写盘移出组合（remember 计算块是主线程同步 IO），改为 LaunchedEffect + 就绪标志。
     val file = remember(code) {
-        val name = "html_preview_" + Integer.toHexString(code.hashCode()) + ".html"
-        java.io.File(ctx.cacheDir, name).also { f ->
-            f.writeText(code)
-        }
+        java.io.File(ctx.cacheDir, "html_preview_" + Integer.toHexString(code.hashCode()) + ".html")
+    }
+    var htmlReady by remember(code) { mutableStateOf(false) }
+    LaunchedEffect(code) {
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { file.writeText(code) }
+        htmlReady = true
     }
     androidx.compose.ui.viewinterop.AndroidView(
         factory = {
@@ -302,7 +305,8 @@ private fun HtmlPreview(code: String, modifier: Modifier = Modifier) {
         },
         update = { wv ->
             val url = "file://" + file.absolutePath
-            if (wv.url != url) wv.loadUrl(url)
+            // 🔴 等 LaunchedEffect 写完盘再 loadUrl，避免加载到旧缓存/不存在文件
+            if (htmlReady && wv.url != url) wv.loadUrl(url)
         },
         modifier = modifier
     )
