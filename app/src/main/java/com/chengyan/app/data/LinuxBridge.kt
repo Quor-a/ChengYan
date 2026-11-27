@@ -35,9 +35,17 @@ object LinuxBridge {
 
     fun run(cmd: String): Long = TtyBridge.run(cmd)
 
-    /** poll 同时刷新 Compose 可观察的 StateFlow。 */
+    /** poll 同时刷新 Compose 可观察的 StateFlow。
+     *  🔴 只在内容真变化时更新：每 150ms 无条件发新 State 会让 Compose 反复重组，
+     *  终端空闲时也在刷，真机触摸即 ANR。State 是 data class，equals 会比较 output 全文，
+     *  但 output 相同 + busy/exit 相同时直接跳过，避免大字符串比较之外的重组开销。 */
     fun poll(): State {
         val p = TtyBridge.poll()
+        val prev = _flow.value
+        if (prev.busy == p.busy && prev.exit == p.exit &&
+            prev.outputLen == p.outputLen && prev.output == p.output) {
+            return prev
+        }
         val s = State(p.busy, p.exit, p.output, p.outputLen)
         _flow.value = s
         return s

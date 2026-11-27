@@ -340,9 +340,12 @@ install_alpine(){
                 }
             } catch (_: Throwable) {}
 
+            // 一次 poll 只做一次全文快照：状态机扫描与显示剥离共用，
+            // 空闲时 dirty=false 直接返回缓存，零大字符串分配。
+            val snapshot = rawSnapshot()
             // 扫描累积输出里的完成标记：只认当前序号，命中即翻转状态。
             if (busy) {
-                val hit = SessionProtocol.exitCodeOf(outBuf.toString(), seq)
+                val hit = SessionProtocol.exitCodeOf(snapshot, seq)
                 if (hit != null) {
                     lastExit = hit
                     busy = false
@@ -354,8 +357,11 @@ install_alpine(){
                     append("[timeout] 命令超过 ${CMD_TIMEOUT_MS / 1000}s 未完成\n")
                 }
             }
-            val visible = SessionProtocol.stripMarkers(outBuf.toString())
-            return State(pty?.isAlive() == true, lastExit, visible, visible.length)
+            if (visibleDirty) {
+                visibleCache = SessionProtocol.stripMarkers(snapshot)
+                visibleDirty = false
+            }
+            return State(pty?.isAlive() == true, lastExit, visibleCache, visibleCache.length)
         }
     }
 
@@ -368,11 +374,24 @@ install_alpine(){
         }
     }
 
+    /** 显示缓存：poll 每 150ms 调一次，不能每次都把 384KB outBuf 全文 toString+扫描
+     *  （真机 ANR：minor faults 69377 = 高频大字符串分配）。只在 append 置脏后重算。 */
+    @Volatile private var visibleDirty = true
+    private var visibleCache = ""
+    private var rawCache = ""
+
     private fun append(s: String) {
         // 原始字节全部进 outBuf：状态机要从中扫描完成标记，绝不能在这里过滤。
         // 显示层（poll 返回 State.output）才剥掉标记回显，UI 形态无需改动。
         outBuf.append(s)
         if (outBuf.length > 384 * 1024) outBuf.delete(0, outBuf.length - 384 * 1024)
+        visibleDirty = true
+    }
+
+    /** outBuf 的字符串快照（只在 dirty 后重算，poll 高频调用不能每次 toString 384KB）。 */
+    private fun rawSnapshot(): String {
+        if (visibleDirty) rawCache = outBuf.toString()
+        return rawCache
     }
 
     fun restart(): Boolean {
@@ -380,6 +399,9 @@ install_alpine(){
             try { pty?.destroy() } catch (_: Throwable) {}
             pty = null
             outBuf.setLength(0)
+            visibleCache = ""
+            rawCache = ""
+            visibleDirty = true
             lastError = ""
             initialized = false
             busy = false

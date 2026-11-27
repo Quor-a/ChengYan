@@ -101,7 +101,8 @@ fun TerminalScreen(onBack: () -> Unit) {
         }
     }
     LaunchedEffect(st.output.length, follow) {
-        if (follow) outScroll.animateScrollTo(outScroll.maxValue)
+        // scrollTo（非 animate）：动画会在输出稳定后仍连续重组，触摸时抢主线程 → ANR。
+        if (follow) outScroll.scrollTo(outScroll.maxValue)
     }
 
     fun send(cmd: String) {
@@ -160,8 +161,11 @@ fun TerminalScreen(onBack: () -> Unit) {
                     .border(1.dp, TermTheme.Border, RoundedCornerShape(14.dp))
             ) {
                 val from = clearAt.coerceAtMost(st.output.length)
-                val window = st.output.drop(from).let { if (it.length > 30_000) it.takeLast(30_000) else it }
-                val text = (probeOut?.let { it + "\n\n" } ?: "") + renderOut(window)
+                // 只渲染尾部窗口：3 万字符的 Text 测量/布局在主线程是重活（真机 ANR 帮凶）。
+                // remember 缓存 renderOut：只有 window 真变化才重跑 ANSI 解析。
+                val window = st.output.drop(from).let { if (it.length > 12_000) it.takeLast(12_000) else it }
+                val rendered = remember(window) { renderOut(window) }
+                val text = (probeOut?.let { it + "\n\n" } ?: "") + rendered
                 Text(
                     text.ifBlank {
                         "┌─ ChengYan Terminal ─────────────\n" +
@@ -246,13 +250,17 @@ fun TerminalScreen(onBack: () -> Unit) {
             }
             QuickKey("探针") {
                 probeOut = "探测中…"
-                Thread {
-                    probeOut = try {
-                        com.chengyan.app.data.FdosProbe.summarize(
-                            com.chengyan.app.data.FdosProbe.run(ctx)
-                        )
-                    } catch (e: Throwable) { "探针失败：${e.message}" }
-                }.start()
+                // IO 线程跑探针，结果回主线程写 Compose 状态（子线程写状态不稳）。
+                scope.launch {
+                    val result = withContext(Dispatchers.IO) {
+                        runCatching {
+                            com.chengyan.app.data.FdosProbe.summarize(
+                                com.chengyan.app.data.FdosProbe.run(ctx)
+                            )
+                        }.getOrElse { "探针失败：${it.message}" }
+                    }
+                    probeOut = result
+                }
             }
         }
 
