@@ -60,7 +60,15 @@ object TtyBridge {
     private val sharedHostDir: String get() = ctx!!.getExternalFilesDir(null)?.absolutePath
         ?: File(filesDir, "shared").apply { mkdirs() }.absolutePath
 
-    fun init(context: Context) { ctx = context.applicationContext }
+    fun init(context: Context) {
+        ctx = context.applicationContext
+        // App 一启动就清旧账：上一版泄漏的 proot/ash 在 App 升级后仍然驻留（同 uid），
+        // 拖满 load（真机 load 9.1 ANR）。不能等用户打开终端（ensure()）才清——
+        // 用户可能一直停在聊天页，旧进程照样把主线程饿死。
+        java.util.concurrent.Executors.newSingleThreadExecutor().execute {
+            runCatching { val n = killOrphanRuntimes(); if (n > 0) lastError = "启动自检: 清理残留运行时进程 $n 个" }
+        }
+    }
 
     // ---------------- 初始化（照 TerminalEnvironment.initializeEnvironment）----------------
 
@@ -306,7 +314,7 @@ install_alpine(){
                 pty = p
             }
             append("ChengYan terminal ready (Alpine 3.24 + proot + real PTY)\n")
-            append("[build] v1.9.13 (13) · ${com.chengyan.app.BuildConfig.BUILD_STAMP}\n")
+            append("[build] v1.9.14 (14) · ${com.chengyan.app.BuildConfig.BUILD_STAMP}\n")
             return 1L
         }
     }
@@ -436,7 +444,12 @@ install_alpine(){
             }.getOrDefault("")
             if (cmdline.isEmpty()) continue
             val isOrphan = cmdline.contains("proot") ||
-                (cmdline.contains("/bin/sh") && cmdline.contains("-l"))
+                cmdline.contains("busybox") ||
+                cmdline.contains("ash") ||
+                (cmdline.contains("/bin/sh") && !cmdline.contains("com.chengyan")) ||
+                cmdline.contains("-l") && (cmdline.contains("sh") || cmdline.contains("bash"))
+            // 匹配放宽：旧进程 cmdline 形态多变（proot/ash/busybox/sh -l），
+            // 宁多杀不漏杀——Android 只允许同 uid，误伤面天然为零（自己进程已跳过）。
             if (isOrphan) {
                 if (runCatching { android.os.Process.killProcess(pid) }.isSuccess) killed++
             }
@@ -484,7 +497,7 @@ install_alpine(){
 
     fun diag(): String = buildString {
         appendLine("runtime=Alpine Linux 3.24 rootfs + proot + real PTY")
-        appendLine("[build] v1.9.13 (13) · ${com.chengyan.app.BuildConfig.BUILD_STAMP}")
+        appendLine("[build] v1.9.14 (14) · ${com.chengyan.app.BuildConfig.BUILD_STAMP}")
         appendLine("rootfs=${File(usrDir, "var/lib/proot-distro/installed-rootfs/alpine").absolutePath}")
         appendLine("tarball=${File(filesDir, ALPINE_FILENAME).let { "${it.exists()} ${it.length()}" }}")
         appendLine("cyBash=${File(binDir, "cy-bash").let { "${it.exists()} ${it.canExecute()}" }}")
