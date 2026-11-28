@@ -4,6 +4,7 @@
   "category": "开发工具",
   "desc": "连接 GitHub：搜仓库、读文件、看提交历史、建 Issue。需 PAT（repo 读取权限即可）。",
   "auth": {"type": "bearer", "header": "Authorization", "prefix": "token ", "cred": "token", "base": "https://api.github.com"},
+  "oauth": {"type": "device", "client_id": "178c6fc778ccc68e1d6a", "device_url": "https://github.com/login/device/code", "token_url": "https://github.com/login/oauth/access_token", "scope": "repo read:user"},
   "credentials": [
     {"key": "token", "label": "Personal Access Token", "placeholder": "ghp_…（github.com/settings/tokens）", "required": true}
   ],

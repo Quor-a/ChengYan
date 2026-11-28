@@ -802,6 +802,30 @@ class ChatViewModel(
         return out
     }
 
+    /** 能力来源全量清单（含未连接项，供选择器展示与引导）。 */
+    fun allSources(): List<Source> {
+        val out = mutableListOf<Source>()
+        runCatching {
+            fun nameOf(d: kotlinx.serialization.json.JsonElement?): String? =
+                (d as? kotlinx.serialization.json.JsonObject)?.get("function")?.let { f -> (f as? kotlinx.serialization.json.JsonObject)?.get("name") }?.let { n -> (n as? kotlinx.serialization.json.JsonPrimitive)?.content }
+            out.add(Source("builtin", "内置工具", com.chengyan.app.net.Tools.definitionsJson().mapNotNull { nameOf(it) }.size, true))
+            out.add(Source("phone", "手机能力", com.chengyan.app.net.PhoneTools.definitionsJson().mapNotNull { nameOf(it) }.size, true))
+            val mcpAll = com.chengyan.app.net.McpManager.loadAll(appContext)
+            mcpAll.forEach {
+                val n = com.chengyan.app.net.McpManager.toolNamesFor(appContext, it.id).size
+                out.add(Source("mcp_" + it.id, it.name, n, n > 0))
+            }
+            com.chengyan.app.net.ConnectorManager.catalog(appContext).forEach {
+                val n = com.chengyan.app.net.ConnectorManager.toolNamesFor(appContext, it.id).size
+                out.add(Source("conn_" + it.id, it.name, n, n > 0))
+            }
+        }
+        return out
+    }
+
+    /** 来源条目：id / 名称 / 可用工具数 / 是否已连接。 */
+    data class Source(val id: String, val name: String, val count: Int, val ready: Boolean)
+
     /** 来源 id 集合 → 展开为具体工具全名集合（供 tools 过滤）。 */
     fun expandSources(ids: List<String>): Set<String> {
         val out = mutableSetOf<String>()

@@ -27,6 +27,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.chengyan.app.ui.theme.*
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * 设置主页（澄言原创）：侧边栏左下角设置图标进入。
@@ -181,11 +182,38 @@ private fun ConnectorDetail(context: android.content.Context, p: com.chengyan.ap
     var tick by remember { mutableStateOf(0) }
     val cur = remember(tick) { com.chengyan.app.net.ConnectorManager.loadAll(context)[p.id] ?: com.chengyan.app.net.ConnectorManager.Connector(id = p.id) }
     val ready = com.chengyan.app.net.ConnectorManager.isReady(p, cur)
+    val scope = rememberCoroutineScope()
+    // OAuth 授权登录状态机
+    var flow by remember { mutableStateOf<com.chengyan.app.net.ConnectorManager.DeviceFlow?>(null) }
+    var flowStatus by remember { mutableStateOf("") }
+
+    fun startOauth() {
+        scope.launch {
+            runCatching {
+                withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    val df = com.chengyan.app.net.ConnectorManager.startDeviceFlow(p)
+                    flow = df; flowStatus = "等待授权"
+                    // 打开浏览器
+                    runCatching {
+                        context.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(df.verificationUri)).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK))
+                    }
+                    // 轮询直到结果（上限 ~3 分钟）
+                    repeat((180 / df.intervalSec).coerceAtMost(60)) {
+                        kotlinx.coroutines.delay(df.intervalSec * 1000L)
+                        val r = com.chengyan.app.net.ConnectorManager.pollDeviceFlow(context, p, df)
+                        if (r != "pending") { flowStatus = r; tick++; return@withContext }
+                    }
+                    flowStatus = "expired"
+                }
+            }.onFailure { flowStatus = "error：" + it.message }
+        }
+    }
+
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
         Row(Modifier.fillMaxWidth().padding(bottom = 8.dp)) {
             Text("‹ 返回目录", fontSize = 13.sp, color = AccentInk, modifier = Modifier.clickable { onBack() })
         }
-        // 头卡：身份 + 启用
+        // 头卡：身份 + 状态
         Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp), color = Paper2, border = androidx.compose.foundation.BorderStroke(1.dp, Line2)) {
             Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
                 Box(Modifier.size(46.dp).background(if (ready) AccentSoft else Ink.copy(alpha = 0.06f), RoundedCornerShape(12.dp)), contentAlignment = Alignment.Center) {
@@ -196,41 +224,27 @@ private fun ConnectorDetail(context: android.content.Context, p: com.chengyan.ap
                     Text(p.name, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, color = Ink)
                     Text(if (ready) "已连接" else "未连接", fontSize = 12.sp, color = if (ready) Ok else Ink4)
                 }
-                TextButton(
-                    onClick = { com.chengyan.app.net.ConnectorManager.upsert(context, cur.copy(enabled = !cur.enabled)); tick++ },
-                    enabled = p.credentials.filter { it.required }.all { cur.creds[it.key]?.isNotBlank() == true },
-                ) { Text(if (cur.enabled) "停用" else "启用", color = if (ready) AccentInk else Ink4) }
             }
         }
         Text(p.desc, fontSize = 12.sp, color = Ink3, lineHeight = 17.sp, modifier = Modifier.padding(top = 10.dp))
         Spacer(Modifier.height(14.dp))
 
-        // 凭据表单（按清单动态生成）
-        Text("凭据", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = Ink)
-        var draft by remember(p.id) { mutableStateOf(cur.creds.toMutableMap()) }
-        p.credentials.forEach { f ->
-            Text(f.label + if (f.required) " *" else "", fontSize = 12.sp, color = Ink3, modifier = Modifier.padding(top = 10.dp))
-            androidx.compose.foundation.text.BasicTextField(
-                value = draft[f.key] ?: f.def,
-                onValueChange = { draft[f.key] = it; draft = draft.toMutableMap() },
-                textStyle = androidx.compose.ui.text.TextStyle(fontSize = 14.sp, color = Ink),
-                decorationBox = { inner ->
-                    Box(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.background, RoundedCornerShape(8.dp)).border(1.dp, Line2, RoundedCornerShape(8.dp)).padding(10.dp)) {
-                        if ((draft[f.key] ?: f.def).isBlank()) Text(f.placeholder, fontSize = 12.sp, color = Ink4)
-                        inner()
-                    }
-                },
-                modifier = Modifier.fillMaxWidth(),
-            )
-        }
-        if (p.credentials.isNotEmpty()) {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                TextButton(onClick = {
-                    val clean = draft.filterValues { it.isNotBlank() }
-                    com.chengyan.app.net.ConnectorManager.upsert(context, cur.copy(creds = clean, enabled = clean.isNotEmpty()))
-                    tick++
-                }) { Text("保存并启用", color = AccentInk) }
-            }
+        if (p.oauth != null) {
+            // ---- OAuth：授权登录即用 ----
+            androidx.compose.material3.Button(
+                onClick = { startOauth() },
+                enabled = flow == null,
+                modifier = Modifier.fillMaxWidth().height(46.dp),
+            ) { Text(if (ready) "重新授权登录" else "授权登录", fontSize = 14.sp) }
+            if (flowStatus == "error" || flowStatus.startsWith("error")) Text(flowStatus, fontSize = 12.sp, color = Err, modifier = Modifier.padding(top = 6.dp))
+            if (flowStatus == "expired") Text("验证码已过期，请重新授权", fontSize = 12.sp, color = Ink3, modifier = Modifier.padding(top = 6.dp))
+            if (flowStatus == "denied") Text("已取消授权", fontSize = 12.sp, color = Ink3, modifier = Modifier.padding(top = 6.dp))
+            var manual by remember(p.id) { mutableStateOf(false) }
+            Text("手动填 Token（备用）", fontSize = 12.sp, color = AccentInk,
+                modifier = Modifier.padding(top = 8.dp).clickable { manual = !manual })
+            if (manual) KeyForm(context, p, cur, onSaved = { tick++ })
+        } else {
+            KeyForm(context, p, cur, onSaved = { tick++ })
         }
         Spacer(Modifier.height(10.dp))
         HorizontalDivider(color = Line2)
@@ -252,6 +266,61 @@ private fun ConnectorDetail(context: android.content.Context, p: com.chengyan.ap
             }
         }
         Spacer(Modifier.height(24.dp))
+    }
+
+    // 授权弹窗：大号用户码 + 自动等待
+    flow?.let { df ->
+        if (flowStatus == "pending" || flowStatus == "等待授权") {
+            androidx.compose.material3.AlertDialog(
+                onDismissRequest = { flow = null; flowStatus = "" },
+                confirmButton = {
+                    TextButton(onClick = {
+                        runCatching { context.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(df.verificationUri)).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)) }
+                    }) { Text("打开授权页", color = AccentInk) }
+                },
+                dismissButton = { TextButton(onClick = { flow = null; flowStatus = "" }) { Text("取消", color = Ink3) } },
+                title = { Text("${p.name} 授权登录", fontSize = 16.sp) },
+                text = {
+                    Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text("请在浏览器输入此验证码：", fontSize = 12.sp, color = Ink3)
+                        Spacer(Modifier.height(8.dp))
+                        Text(df.userCode, fontSize = 28.sp, fontWeight = FontWeight.Bold, color = AccentInk,
+                            fontFamily = FontFamily.Monospace)
+                        Spacer(Modifier.height(8.dp))
+                        Text("已自动打开授权页，正在等待你完成授权…", fontSize = 12.sp, color = Ink3)
+                    }
+                },
+            )
+        }
+    }
+}
+
+/** 凭据表单（非 OAuth 连接器 / 手动备用）。 */
+@Composable
+private fun KeyForm(context: android.content.Context, p: com.chengyan.app.net.ConnectorManager.Provider, cur: com.chengyan.app.net.ConnectorManager.Connector, onSaved: () -> Unit) {
+    Text("凭据", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = Ink)
+    var draft by remember(p.id) { mutableStateOf(cur.creds.toMutableMap()) }
+    p.credentials.forEach { f ->
+        Text(f.label + if (f.required) " *" else "", fontSize = 12.sp, color = Ink3, modifier = Modifier.padding(top = 10.dp))
+        androidx.compose.foundation.text.BasicTextField(
+            value = draft[f.key] ?: f.def,
+            onValueChange = { draft[f.key] = it; draft = draft.toMutableMap() },
+            textStyle = androidx.compose.ui.text.TextStyle(fontSize = 14.sp, color = Ink),
+            decorationBox = { inner ->
+                Box(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.background, RoundedCornerShape(8.dp)).border(1.dp, Line2, RoundedCornerShape(8.dp)).padding(10.dp)) {
+                    if ((draft[f.key] ?: f.def).isBlank()) Text(f.placeholder, fontSize = 12.sp, color = Ink4)
+                    inner()
+                }
+            },
+            modifier = Modifier.fillMaxWidth(),
+        )
+    }
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+        TextButton(onClick = {
+            val clean = draft.filterValues { it.isNotBlank() }
+            com.chengyan.app.net.ConnectorManager.upsert(context, cur.copy(creds = clean, enabled = clean.isNotEmpty()))
+            onSaved()
+        }) { Text("保存并启用", color = AccentInk) }
     }
 }
 

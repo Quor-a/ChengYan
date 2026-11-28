@@ -934,25 +934,23 @@ private fun ComposerBar(vm: ChatViewModel) {
     }
 }
 
-/** 能力来源选择（对标 LobeChat 工具选择 ActionBar）：单位=MCP 服务器/连接器/内置组，卡片式。 */
+/** 能力来源选择：单位=MCP 服务器/连接器/内置组。始终显示全部来源；未连接的灰显并引导去设置连接。 */
 @Composable
 private fun ToolPickerSheet(vm: ChatViewModel, onDismiss: () -> Unit) {
-    val context = androidx.compose.ui.platform.LocalContext.current
-    val sources = remember { vm.availableSources() }
+    val sources = remember { vm.allSources() }
     val selected = remember { mutableStateListOf<String>().apply { addAll(vm.current?.enabledTools.orEmpty()) } }
     androidx.compose.material3.ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp).padding(bottom = 24.dp)) {
             Text("能力来源", fontSize = 18.sp, fontWeight = FontWeight.SemiBold, color = Ink)
             Text(
-                "点选本次对话让 AI 用哪些来源：不选=全部可用；选中一个 MCP 服务器或连接器，AI 就只用它的工具干活。",
+                "点选本次对话让 AI 用哪些来源：不选=全部可用；选中一个 MCP 服务器或连接器，AI 就只用它干活。",
                 fontSize = 12.sp, color = Ink3, lineHeight = 16.sp, modifier = Modifier.padding(top = 4.dp)
             )
             Spacer(Modifier.height(12.dp))
             var lastGroup by remember { mutableStateOf("") }
-            sources.forEach { (id, name, count) ->
+            sources.forEach { (id, name, count, ready) ->
                 val group = when {
-                    id == "builtin" -> "基础"
-                    id == "phone" -> "基础"
+                    id == "builtin" || id == "phone" -> "基础"
                     id.startsWith("mcp_") -> "MCP 服务器"
                     else -> "连接器"
                 }
@@ -960,13 +958,15 @@ private fun ToolPickerSheet(vm: ChatViewModel, onDismiss: () -> Unit) {
                     lastGroup = group
                     Text(group, fontSize = 12.sp, color = Ink4, modifier = Modifier.padding(top = 12.dp, bottom = 4.dp))
                 }
-                val on = id in selected
+                val on = ready && id in selected
                 Surface(
                     shape = RoundedCornerShape(12.dp),
                     color = if (on) AccentSoft else Paper2,
                     border = androidx.compose.foundation.BorderStroke(if (on) 1.5.dp else 1.dp, if (on) Accent else Line),
                     modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp).clickable {
-                        if (on) selected.remove(id) else selected.add(id)
+                        if (on) selected.remove(id)
+                        else if (ready) selected.add(id)
+                        else vm.showToast("先去 设置 › ${if (id.startsWith("mcp_")) "MCP 服务" else "连接器"} 连接「$name」")
                     },
                 ) {
                     Row(Modifier.padding(horizontal = 14.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -974,12 +974,13 @@ private fun ToolPickerSheet(vm: ChatViewModel, onDismiss: () -> Unit) {
                             Modifier.size(34.dp).background(if (on) Accent.copy(alpha = 0.18f) else Ink.copy(alpha = 0.06f), RoundedCornerShape(9.dp)),
                             contentAlignment = Alignment.Center,
                         ) {
-                            Text(name.firstOrNull()?.uppercase() ?: "?", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = if (on) AccentInk else Ink3)
+                            Text(name.firstOrNull()?.uppercase() ?: "?", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = if (on || ready) AccentInk else Ink4)
                         }
                         Spacer(Modifier.width(12.dp))
                         Column(Modifier.weight(1f)) {
-                            Text(name, fontSize = 14.sp, fontWeight = FontWeight.Medium, color = Ink)
-                            Text("$count 个工具", fontSize = 11.sp, color = Ink3)
+                            Text(name, fontSize = 14.sp, fontWeight = FontWeight.Medium,
+                                color = if (ready) Ink else Ink4)
+                            Text(if (ready) "$count 个工具" else "未连接 · 点去设置连接", fontSize = 11.sp, color = Ink4)
                         }
                         Box(
                             Modifier.size(20.dp).background(if (on) Accent else Paper3, androidx.compose.foundation.shape.CircleShape),

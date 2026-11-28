@@ -19,6 +19,7 @@ object ConnectorManager {
         val category: String,
         val desc: String,
         val auth: JSONObject,
+        val oauth: JSONObject?,
         val credentials: List<CredField>,
         val headers: Map<String, String>,
         val tools: List<ToolSpec>,
@@ -67,6 +68,7 @@ object ConnectorManager {
         id = o.getString("id"), name = o.getString("name"),
         category = o.optString("category", "服务"), desc = o.optString("desc", ""),
         auth = o.optJSONObject("auth") ?: JSONObject().put("type", "none"),
+        oauth = o.optJSONObject("oauth"),
         credentials = o.optJSONArray("credentials")?.let { a ->
             (0 until a.length()).map { i ->
                 val c = a.getJSONObject(i)
@@ -148,6 +150,65 @@ object ConnectorManager {
         val c = loadAll(ctx)[id] ?: return emptyList()
         if (!isReady(p, c)) return emptyList()
         return p.tools.map { "conn_${p.id}_${it.name}" }.filter { it !in c.disabledTools }
+    }
+
+    // ---------- OAuth 设备授权流程（RFC 8628，无 secret，授权登录即用） ----------
+
+    data class DeviceFlow(val deviceCode: String, val userCode: String, val verificationUri: String, val intervalSec: Int)
+
+    private fun oauthPost(url: String, form: Map<String, String>): JSONObject {
+        val body = form.entries.joinToString("&") {
+            java.net.URLEncoder.encode(it.key, "UTF-8") + "=" + java.net.URLEncoder.encode(it.value, "UTF-8")
+        }
+        val conn = java.net.URL(url).openConnection() as java.net.HttpURLConnection
+        conn.requestMethod = "POST"; conn.doOutput = true
+        conn.connectTimeout = 10_000; conn.readTimeout = 30_000
+        conn.setRequestProperty("Accept", "application/json")
+        conn.setRequestProperty("Content-Type", "application/x-www-form-urlencoded")
+        conn.setRequestProperty("User-Agent", "ChengYan/1.9")
+        conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+        val text = conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+        conn.disconnect()
+        return JSONObject(text)
+    }
+
+    /** 第一步：取设备码+用户码。 */
+    fun startDeviceFlow(p: Provider): DeviceFlow {
+        val o = p.oauth ?: throw RuntimeException("该连接器不支持授权登录")
+        val resp = oauthPost(o.getString("device_url"), mapOf(
+            "client_id" to o.getString("client_id"),
+            "scope" to o.optString("scope", ""),
+        ))
+        return DeviceFlow(
+            deviceCode = resp.optString("device_code"),
+            userCode = resp.optString("user_code"),
+            verificationUri = resp.optString("verification_uri"),
+            intervalSec = resp.optInt("interval", 5).coerceAtLeast(3),
+        )
+    }
+
+    /** 第二步轮询一次：返回 "ok"（token 已存）/ "pending" / "expired" / "denied"。 */
+    fun pollDeviceFlow(ctx: Context, p: Provider, df: DeviceFlow): String {
+        val o = p.oauth ?: return "expired"
+        val resp = oauthPost(o.getString("token_url"), mapOf(
+            "client_id" to o.getString("client_id"),
+            "device_code" to df.deviceCode,
+            "grant_type" to "urn:ietf:params:oauth:grant-type:device_code",
+        ))
+        val err = resp.optString("error")
+        return when {
+            resp.optString("access_token").isNotBlank() -> {
+                upsert(ctx, (loadAll(ctx)[p.id] ?: Connector(id = p.id)).copy(
+                    creds = mapOf((o.optString("cred", "token")) to resp.getString("access_token")),
+                    enabled = true,
+                ))
+                "ok"
+            }
+            err == "authorization_pending" || err == "slow_down" -> "pending"
+            err == "expired_token" -> "expired"
+            err == "access_denied" -> "denied"
+            else -> "expired"
+        }
     }
 
     // ---------- 并入 AI 工具表（仅已连接的 provider） ----------
