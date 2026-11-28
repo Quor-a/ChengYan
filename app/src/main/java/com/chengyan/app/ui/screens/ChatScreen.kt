@@ -713,6 +713,8 @@ private fun ChatArea(vm: ChatViewModel, modifier: Modifier = Modifier, onEdit: (
                     userAvatarUri = vm.userProfile.avatarUri,
                     onEditSoul = { editSoulOpen = true },
                     onEditUser = { editUserOpen = true },
+                    // A2UI 按钮/卡片动作：点击 = 发用户消息让 AI 继续执行
+                    onActionSend = { text -> vm.send(text, emptyList(), emptyList()) },
                 )
             }
         }

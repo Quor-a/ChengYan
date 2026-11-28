@@ -79,6 +79,8 @@ fun MessageBubble(
     userAvatarUri: String = "",
     onEditSoul: () -> Unit = {},
     onEditUser: () -> Unit = {},
+    // A2UI Button 动作回传：点击按钮 = 发一条用户消息让 AI 继续编排
+    onActionSend: (String) -> Unit = {},
 ) {
     val isUser = message.role == "user"
     val clipboard = LocalClipboardManager.current
@@ -228,11 +230,26 @@ fun MessageBubble(
                     )
                 } else {
                     Column(Modifier.fillMaxWidth()) {
+                        // A2UI 画布：先摘出 ```a2ui 围栏（Agent-to-UI 协议，声明式组件树）
+                        val a2 = remember(message.content) {
+                            com.chengyan.app.data.A2uiParser.parse(message.content)
+                        }
                         // ui-card 富卡片：从正文摘出围栏 JSON，渲染成结构化组件
-                        val parsed = remember(message.content) {
-                            com.chengyan.app.data.UiCardParser.parse(message.content)
+                        val parsed = remember(a2.first, message.content) {
+                            com.chengyan.app.data.UiCardParser.parse(a2.first)
                         }
                         MarkdownText(parsed.first)
+                        if (a2.second.isNotEmpty()) {
+                            Spacer(Modifier.height(8.dp))
+                            a2.second.forEach { surface ->
+                                A2uiSurface(surface) { label, action ->
+                                    onActionSend("【界面操作】$label " + action.optString("name") +
+                                        (if (action.optJSONObject("context")?.length() ?: 0 > 0)
+                                            " 上下文：" + action.optJSONObject("context").toString() else ""))
+                                }
+                                Spacer(Modifier.height(6.dp))
+                            }
+                        }
                         if (parsed.second.isNotEmpty()) {
                             Spacer(Modifier.height(8.dp))
                             parsed.second.forEach { card ->

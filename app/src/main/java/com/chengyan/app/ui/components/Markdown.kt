@@ -26,15 +26,21 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.layout.*
 import com.chengyan.app.ui.theme.*
+import kotlinx.coroutines.withContext
+import androidx.compose.foundation.gestures.detectTapGestures
 
 /** 轻量 Markdown 解析结果节点。 */
 sealed interface MdNode {
     data class Para(val spans: List<MdSpan>, val isHeading: Int = 0) : MdNode
     data class Quote(val lines: List<String>) : MdNode
-    data class ListBlock(val ordered: Boolean, val items: List<List<MdSpan>>) : MdNode
+    data class ListBlock(val ordered: Boolean, val items: List<List<MdSpan>>, val tasks: List<Boolean?> = emptyList()) : MdNode
     data class Code(val lang: String, val code: String) : MdNode
+    data class Table(val header: List<List<MdSpan>>, val rows: List<List<List<MdSpan>>>) : MdNode
+    data class Image(val url: String, val alt: String) : MdNode
     data object Rule : MdNode
 }
 
@@ -42,6 +48,7 @@ sealed interface MdSpan {
     data class Text(val text: String) : MdSpan
     data class Bold(val inner: String) : MdSpan
     data class Italic(val inner: String) : MdSpan
+    data class Strike(val inner: String) : MdSpan
     data class Code(val inner: String) : MdSpan
     data class Link(val label: String, val url: String) : MdSpan
 }
@@ -74,13 +81,28 @@ fun parseMarkdown(src: String): List<MdNode> {
             nodes += MdNode.Code(lang, code.toString().trimEnd('\n'))
             continue
         }
-        val heading = Regex("^(#{1,3})\\s+(.*)").find(line)
+        val heading = Regex("^(#{1,6})\\s+(.*)").find(line)
         if (heading != null) {
             flush()
             nodes += MdNode.Para(joinSpans(listOf(heading.groupValues[2])), heading.groupValues[1].length)
             i++; continue
         }
         if (Regex("^\\s*(?:[-*_]\\s*){3,}$").matches(line)) { flush(); nodes += MdNode.Rule; i++; continue }
+        // 图片行：![alt](url)
+        val img = Regex("^!\\[([^]]*)]\\((https?://[^)\\s]+)\\)\\s*$").find(line)
+        if (img != null) { flush(); nodes += MdNode.Image(img.groupValues[2], img.groupValues[1]); i++; continue }
+        // 表格：| a | b | 行 + |---|---| 分隔行
+        if (line.trimStart().startsWith("|") && i + 1 < lines.size &&
+            Regex("^\\s*\\|?[\\s:|-]+\\|?\\s*$").matches(lines[i + 1]) && lines[i + 1].contains('-')) {
+            flush()
+            fun cells(l: String) = l.trim().trim('|').split('|').map { joinSpans(listOf(it.trim())) }
+            val header = cells(line)
+            var j = i + 2
+            val rows = mutableListOf<List<List<MdSpan>>>()
+            while (j < lines.size && lines[j].trimStart().startsWith("|")) { rows += cells(lines[j]); j++ }
+            nodes += MdNode.Table(header, rows)
+            i = j; continue
+        }
         if (Regex("^\\s*>\\s?").containsMatchIn(line)) {
             flush()
             val q = mutableListOf<String>()
@@ -99,7 +121,18 @@ fun parseMarkdown(src: String): List<MdNode> {
                 val m2 = Regex("^\\s*([-*+]|\\d+[.)])\\s+(.*)").find(lines[i]) ?: break
                 items += m2.groupValues[2]; i++
             }
-            nodes += MdNode.ListBlock(ordered, items.map { joinSpans(listOf(it)) }); continue
+            // 任务列表：[ ] 未完成 / [x] 已完成（前缀摘除，渲染为状态徽标）
+            val tasks = items.map {
+                when {
+                    it.startsWith("[ ] ") || it.startsWith("[ ]\t") -> false
+                    it.startsWith("[x] ") || it.startsWith("[X] ") || it.startsWith("[x]\t") -> true
+                    else -> null
+                }
+            }
+            val cleaned = items.mapIndexed { k, it ->
+                if (tasks[k] != null) it.substring(4).trim() else it
+            }
+            nodes += MdNode.ListBlock(ordered, cleaned.map { joinSpans(listOf(it)) }, tasks); continue
         }
         if (line.isBlank()) { flush(); i++; continue }
         para += line; i++
@@ -112,7 +145,7 @@ fun parseMarkdown(src: String): List<MdNode> {
 fun joinSpans(lines: List<String>): List<MdSpan> {
     val text = lines.joinToString("\n")
     val spans = mutableListOf<MdSpan>()
-    val regex = Regex("(`[^`]+`|\\*\\*[^*]+\\*\\*|\\*[^*\\n]+\\*|\\[[^]]+\\]\\(https?://[^)\\s]+\\))")
+    val regex = Regex("(`[^`]+`|\\*\\*[^*]+\\*\\*|~~[^~]+~~|\\*[^*\\n]+\\*|\\[[^]]+]\\(https?://[^)\\s]+\\))")
     var last = 0
     for (m in regex.findAll(text)) {
         if (m.range.first > last) spans += MdSpan.Text(text.substring(last, m.range.first))
@@ -120,6 +153,7 @@ fun joinSpans(lines: List<String>): List<MdSpan> {
         spans += when {
             t.startsWith("`") -> MdSpan.Code(t.trim('`'))
             t.startsWith("**") -> MdSpan.Bold(t.trim('*'))
+            t.startsWith("~~") -> MdSpan.Strike(t.trim('~'))
             t.startsWith("*") -> MdSpan.Italic(t.trim('*'))
             else -> {
                 val mm = Regex("\\[([^]]+)]\\((https?://[^)\\s]+)\\)").matchEntire(t)!!
@@ -149,13 +183,40 @@ private fun MdNodeView(node: MdNode) {
                 1 -> MaterialTheme.typography.titleLarge
                 2 -> MaterialTheme.typography.titleMedium
                 3 -> MaterialTheme.typography.titleSmall
+                4, 5, 6 -> MaterialTheme.typography.bodyMedium
                 else -> MaterialTheme.typography.bodyMedium
             }
+            // 链接命中检测：偏移累计出 Link span 的字符区间
+            val ctx = androidx.compose.ui.platform.LocalContext.current
+            var layout by remember { mutableStateOf<androidx.compose.ui.text.TextLayoutResult?>(null) }
+            val links = remember(node.spans) {
+                var off = 0; node.spans.flatMap { s ->
+                    when (s) {
+                        is MdSpan.Link -> { val r = off..(off + s.label.length); off += s.label.length; listOf(r to s.url) }
+                        is MdSpan.Text -> { off += s.text.length; emptyList() }
+                        is MdSpan.Bold -> { off += s.inner.length; emptyList() }
+                        is MdSpan.Italic -> { off += s.inner.length; emptyList() }
+                        is MdSpan.Strike -> { off += s.inner.length; emptyList() }
+                        is MdSpan.Code -> { off += s.inner.length; emptyList() }
+                    }
+                }
+            }
+            val annotated = buildAnnotated(node.spans)
             Text(
-                buildAnnotated(node.spans),
+                annotated,
                 style = style,
                 fontWeight = if (node.isHeading > 0) FontWeight.SemiBold else null,
+                onTextLayout = { layout = it },
                 modifier = Modifier.padding(vertical = 3.dp)
+                    .then(if (links.isNotEmpty()) Modifier.pointerInput(annotated) {
+                        detectTapGestures { pos ->
+                            val off = layout?.getOffsetForPosition(pos) ?: return@detectTapGestures
+                            val url = links.firstOrNull { off >= it.first.first && off <= it.first.last }?.second
+                            if (url != null) runCatching {
+                                ctx.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(url)))
+                            }
+                        }
+                    } else Modifier)
             )
         }
         is MdNode.Quote -> Row {
@@ -166,12 +227,20 @@ private fun MdNodeView(node: MdNode) {
         is MdNode.ListBlock -> Column(Modifier.padding(vertical = 3.dp)) {
             node.items.forEachIndexed { idx, item ->
                 Row(Modifier.padding(vertical = 1.dp)) {
-                    Text(if (node.ordered) "${idx + 1}. " else "•  ",
-                        style = MaterialTheme.typography.bodyMedium, color = Accent)
-                    Text(buildAnnotated(item), style = MaterialTheme.typography.bodyMedium)
+                    val task = node.tasks.getOrNull(idx)
+                    if (task != null) {
+                        Text(if (task) "☑ " else "☐ ", fontSize = 15.sp, color = if (task) Ok else Ink4)
+                    } else {
+                        Text(if (node.ordered) "${idx + 1}. " else "•  ",
+                            style = MaterialTheme.typography.bodyMedium, color = Accent)
+                    }
+                    Text(buildAnnotated(item), style = MaterialTheme.typography.bodyMedium,
+                        color = if (task == true) Ink4 else Color.Unspecified)
                 }
             }
         }
+        is MdNode.Table -> TableView(node)
+        is MdNode.Image -> MdImage(node)
         is MdNode.Code -> CodeBlock(node.lang, node.code)
         MdNode.Rule -> Box(
             Modifier.fillMaxWidth().padding(vertical = 6.dp).height(1.dp)
@@ -179,6 +248,66 @@ private fun MdNodeView(node: MdNode) {
         )
     }
 }
+
+/** 表格：横向可滚动的网格 + 头行强调底色。 */
+@Composable
+private fun TableView(t: MdNode.Table) {
+    Column(Modifier.padding(vertical = 6.dp).horizontalScroll(rememberScrollState())) {
+        Row {
+            t.header.forEach { cell ->
+                Text(buildAnnotated(cell), fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = Ink,
+                    modifier = Modifier.weight(1f, false).widthIn(min = 100.dp).background(Paper2).padding(8.dp))
+            }
+        }
+        androidx.compose.material3.HorizontalDivider(color = Line)
+        t.rows.forEachIndexed { rIdx, row ->
+            Row {
+                row.forEach { cell ->
+                    Text(buildAnnotated(cell), fontSize = 12.sp, color = Ink2,
+                        modifier = Modifier.weight(1f, false).widthIn(min = 100.dp).padding(8.dp))
+                }
+            }
+            if (rIdx < t.rows.size - 1) androidx.compose.material3.HorizontalDivider(color = Line.copy(alpha = 0.4f))
+        }
+    }
+}
+
+/** Markdown 图片：http(s) 位图下载（降采样，缓存按 url）。 */
+@Composable
+private fun MdImage(img: MdNode.Image) {
+    var bmp by remember(img.url) { mutableStateOf<android.graphics.Bitmap?>(null) }
+    var failed by remember(img.url) { mutableStateOf(false) }
+    LaunchedEffect(img.url) {
+        runCatching {
+            withContext(kotlinx.coroutines.Dispatchers.IO) {
+                val conn = java.net.URL(img.url).openConnection() as java.net.HttpURLConnection
+                conn.connectTimeout = 8000; conn.readTimeout = 15000
+                conn.setRequestProperty("User-Agent", "ChengYan/1.9")
+                val bytes = conn.inputStream.use { it.readBytes() }
+                conn.disconnect()
+                val opts = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
+                var sample = 1
+                while (opts.outWidth / sample > 1024) sample *= 2
+                android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size,
+                    android.graphics.BitmapFactory.Options().apply { inSampleSize = sample })
+            }
+        }.onSuccess { bmp = it }.onFailure { failed = true }
+    }
+    val b = bmp
+    if (b != null) {
+        androidx.compose.foundation.Image(b.asImageBitmap(), img.alt.ifBlank { "图片" },
+            Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).padding(vertical = 4.dp),
+            contentScale = androidx.compose.ui.layout.ContentScale.FillWidth)
+    } else if (failed) {
+        Text("[图片加载失败：${img.alt}]", fontSize = 11.sp, color = Ink4)
+    } else {
+        Box(Modifier.fillMaxWidth().height(120.dp).background(Paper3, RoundedCornerShape(12.dp)),
+            contentAlignment = Alignment.Center) { Text("图片加载中…", fontSize = 11.sp, color = Ink4) }
+    }
+}
+
+/** 删除线渲染在 buildAnnotated 中。 */
 
 @Composable
 private fun CodeBlock(lang: String, code: String) {
@@ -324,6 +453,8 @@ fun buildAnnotated(spans: List<MdSpan>): AnnotatedString {
                 is MdSpan.Text -> append(s.text)
                 is MdSpan.Bold -> withStyle(SpanStyle(fontWeight = FontWeight.Bold)) { append(s.inner) }
                 is MdSpan.Italic -> withStyle(SpanStyle(fontStyle = FontStyle.Italic)) { append(s.inner) }
+                is MdSpan.Strike -> withStyle(SpanStyle(textDecoration = androidx.compose.ui.text.style.TextDecoration.LineThrough,
+                    color = Ink4)) { append(s.inner) }
                 is MdSpan.Code -> withStyle(androidx.compose.ui.text.SpanStyle(
                     fontFamily = monoSafe(s.inner),
                     fontSize = 13.sp,
