@@ -505,7 +505,8 @@ class ChatViewModel(
             "短信/通话记录等权限被系统拒绝时，先让用户装好并启动 Shizuku，再用 phone_sys(shizuku_grant) 一键授权后重试；" +
             "已连接的 MCP 服务器工具以 mcp_ 前缀出现；已启用的连接器工具（GitHub/高德等应用）以 conn_ 前缀出现，均可直接调用。" +
             (if (current?.enabledTools.orEmpty().isNotEmpty())
-                "【本轮能力定向】用户为本对话只启用了这些能力来源：" + current!!.enabledTools.joinToString("、") + "。只能调用这些来源下的工具，未列出的来源（包括其它 MCP/连接器）不要尝试；若任务确实需要其它工具，用 ask_user 说明。" + "\n"
+                "【本轮能力定向】用户为本对话只启用了这些能力来源：" + selectedSourcesDescribe(current!!.enabledTools) +
+                    "。只能调用上面列出的这些工具，未列出的来源（包括其它 MCP/连接器、内置工具）一律不要尝试；若任务确实需要其它工具，用 ask_user 向用户说明。" + "\n"
             else "") +
             "【交互铁律】执行任务遇到关键信息缺失、方案分歧或不可逆风险时，用 ask_user 向用户提问（支持候选项点选），拿到回答后继续执行，直到任务完成或确实无法推进——不要瞎猜参数，也不要不问就结束。" +
             "今天的日期：${df.format(java.util.Date())}。" +
@@ -821,6 +822,32 @@ class ChatViewModel(
             }
         }
         return out
+    }
+
+    /** 选中来源 → 「名称（工具: a, b, c）」描述，注入提示词让 AI 明确知道本轮有哪些工具。 */
+    fun selectedSourcesDescribe(ids: List<String>): String {
+        val parts = mutableListOf<String>()
+        runCatching {
+            fun nameOf(d: kotlinx.serialization.json.JsonElement?): String? =
+                (d as? kotlinx.serialization.json.JsonObject)?.get("function")?.let { f -> (f as? kotlinx.serialization.json.JsonObject)?.get("name") }?.let { n -> (n as? kotlinx.serialization.json.JsonPrimitive)?.content }
+            ids.forEach { id ->
+                when {
+                    id == "builtin" -> parts.add("内置工具（工具: " + com.chengyan.app.net.Tools.definitionsJson().mapNotNull { nameOf(it) }.joinToString(", ") + "）")
+                    id == "phone" -> parts.add("手机能力（工具: " + com.chengyan.app.net.PhoneTools.definitionsJson().mapNotNull { nameOf(it) }.joinToString(", ") + "）")
+                    id.startsWith("mcp_") -> {
+                        val srv = com.chengyan.app.net.McpManager.loadAll(appContext).find { it.id == id.removePrefix("mcp_") }
+                        val tools = com.chengyan.app.net.McpManager.toolNamesFor(appContext, id.removePrefix("mcp_"))
+                        parts.add("MCP 服务器「" + (srv?.name ?: id) + "」（工具: " + tools.joinToString(", ") + "）")
+                    }
+                    id.startsWith("conn_") -> {
+                        val p = com.chengyan.app.net.ConnectorManager.catalog(appContext).find { it.id == id.removePrefix("conn_") }
+                        val tools = com.chengyan.app.net.ConnectorManager.toolNamesFor(appContext, id.removePrefix("conn_"))
+                        parts.add("连接器「" + (p?.name ?: id) + "」（工具: " + tools.joinToString(", ") + "）")
+                    }
+                }
+            }
+        }
+        return if (parts.isEmpty()) ids.joinToString("、") else parts.joinToString("；")
     }
 
     /** 来源条目：id / 名称 / 可用工具数 / 是否已连接。 */

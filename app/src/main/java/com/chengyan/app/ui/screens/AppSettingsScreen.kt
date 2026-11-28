@@ -168,7 +168,58 @@ private fun ConnectorContent(context: android.content.Context, onClose: () -> Un
                                 fontSize = 11.sp, color = Ink3, maxLines = 1, overflow = TextOverflow.Ellipsis,
                             )
                         }
+                        if (com.chengyan.app.net.ConnectorManager.isCustom(context, p.id)) {
+                            Text("删除", fontSize = 12.sp, color = Err, modifier = Modifier.clickable {
+                                com.chengyan.app.net.ConnectorManager.removeCustom(context, p.id); tick++
+                            })
+                            Spacer(Modifier.width(10.dp))
+                        }
                         Text("›", fontSize = 18.sp, color = Ink4)
+                    }
+                }
+            }
+            Spacer(Modifier.height(14.dp))
+            // ＋ 添加连接器：粘贴/导入声明式 JSON 清单（零代码）
+            var showAdd by remember { mutableStateOf(false) }
+            var addErr by remember { mutableStateOf("") }
+            if (showAdd) {
+                var draft by remember { mutableStateOf("") }
+                Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp), color = Paper2, border = androidx.compose.foundation.BorderStroke(1.dp, Line2)) {
+                    Column(Modifier.padding(14.dp)) {
+                        Text("添加连接器 · 粘贴 JSON 清单", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = Ink)
+                        Text("schema：id/name/category/desc/auth/credentials/tools（参考内置清单格式）", fontSize = 11.sp, color = Ink4, modifier = Modifier.padding(top = 2.dp))
+                        androidx.compose.foundation.text.BasicTextField(
+                            value = draft,
+                            onValueChange = { draft = it },
+                            textStyle = androidx.compose.ui.text.TextStyle(fontSize = 12.sp, color = Ink, fontFamily = FontFamily.Monospace),
+                            modifier = Modifier.fillMaxWidth().padding(top = 8.dp).background(MaterialTheme.colorScheme.background, RoundedCornerShape(8.dp)).border(1.dp, Line2, RoundedCornerShape(8.dp)).padding(10.dp).height(140.dp),
+                        )
+                        if (addErr.isNotBlank()) Text(addErr, fontSize = 12.sp, color = Err, modifier = Modifier.padding(top = 6.dp))
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
+                            Text("取消", fontSize = 13.sp, color = Ink3, modifier = Modifier.clickable { showAdd = false; addErr = "" }.padding(8.dp))
+                            Spacer(Modifier.width(8.dp))
+                            TextButton(onClick = {
+                                val err = com.chengyan.app.net.ConnectorManager.addCustom(context, draft)
+                                if (err == null) { showAdd = false; addErr = ""; tick++ } else addErr = err
+                            }) { Text("保存", color = AccentInk) }
+                        }
+                    }
+                }
+            } else {
+                Surface(
+                    Modifier.fillMaxWidth().clickable { showAdd = true },
+                    shape = RoundedCornerShape(12.dp), color = Paper2,
+                    border = androidx.compose.foundation.BorderStroke(1.dp, Accent.copy(alpha = 0.4f)),
+                ) {
+                    Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Box(Modifier.size(38.dp).background(AccentSoft, RoundedCornerShape(10.dp)), contentAlignment = Alignment.Center) {
+                            Text("＋", fontSize = 18.sp, fontWeight = FontWeight.SemiBold, color = AccentInk)
+                        }
+                        Spacer(Modifier.width(12.dp))
+                        Column {
+                            Text("添加连接器", fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = AccentInk)
+                            Text("粘贴声明式 JSON 清单，保存后立即出现在目录与 AI 工具表", fontSize = 11.sp, color = Ink3)
+                        }
                     }
                 }
             }

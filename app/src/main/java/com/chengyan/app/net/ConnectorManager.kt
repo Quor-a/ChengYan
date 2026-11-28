@@ -52,8 +52,9 @@ object ConnectorManager {
     // ---------- 目录加载（assets/connectors/*.json） ----------
 
     fun catalog(ctx: Context): List<Provider> = runCatching {
-        val am = ctx.assets
         val list = mutableListOf<Provider>()
+        // 内置清单
+        val am = ctx.assets
         for (f in am.list("connectors") ?: emptyArray()) {
             if (!f.endsWith(".json")) continue
             runCatching {
@@ -61,8 +62,31 @@ object ConnectorManager {
                 list += parseProvider(o)
             }
         }
+        // 用户添加的清单（设置页粘贴/导入 JSON，存 filesDir/connectors）
+        val dir = java.io.File(ctx.filesDir, "connectors")
+        if (dir.isDirectory) dir.listFiles()?.filter { it.name.endsWith(".json") }?.forEach { f ->
+            runCatching { list += parseProvider(JSONObject(f.readText(Charsets.UTF_8))) }
+        }
         list.sortedBy { it.category }
     }.getOrDefault(emptyList())
+
+    /** 添加自定义连接器：校验 JSON 并写入 filesDir/connectors/<id>.json。返回错误信息，null=成功。 */
+    fun addCustom(ctx: Context, jsonText: String): String? {
+        val o = runCatching { JSONObject(jsonText) }.getOrElse { return "JSON 解析失败：${it.message}" }
+        val id = o.optString("id")
+        if (id.isBlank()) return "缺少 id 字段"
+        if (o.optJSONArray("tools") == null || o.optJSONArray("tools").length() == 0) return "缺少 tools 工具清单"
+        val dir = java.io.File(ctx.filesDir, "connectors").apply { mkdirs() }
+        java.io.File(dir, "$id.json").writeText(o.toString(2), Charsets.UTF_8)
+        return null
+    }
+
+    /** 删除自定义连接器（仅 filesDir 内的）。 */
+    fun removeCustom(ctx: Context, id: String) {
+        java.io.File(ctx.filesDir, "connectors/$id.json").delete()
+    }
+
+    fun isCustom(ctx: Context, id: String): Boolean = java.io.File(ctx.filesDir, "connectors/$id.json").exists()
 
     private fun parseProvider(o: JSONObject): Provider = Provider(
         id = o.getString("id"), name = o.getString("name"),

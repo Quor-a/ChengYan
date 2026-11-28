@@ -937,23 +937,19 @@ private fun ComposerBar(vm: ChatViewModel) {
 /** 能力来源选择：单位=MCP 服务器/连接器/内置组。始终显示全部来源；未连接的灰显并引导去设置连接。 */
 @Composable
 private fun ToolPickerSheet(vm: ChatViewModel, onDismiss: () -> Unit) {
-    val sources = remember { vm.allSources() }
+    val sources = remember { vm.allSources().filter { it.id != "builtin" && it.id != "phone" } }
     val selected = remember { mutableStateListOf<String>().apply { addAll(vm.current?.enabledTools.orEmpty()) } }
     androidx.compose.material3.ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp).padding(bottom = 24.dp)) {
             Text("能力来源", fontSize = 18.sp, fontWeight = FontWeight.SemiBold, color = Ink)
             Text(
-                "点选本次对话让 AI 用哪些来源：不选=全部可用；选中一个 MCP 服务器或连接器，AI 就只用它干活。",
+                "点选本次对话让 AI 用哪些 MCP 服务器 / 连接器，点「确定」生效：不选=全部可用；选中后 AI 只用所选来源的工具。",
                 fontSize = 12.sp, color = Ink3, lineHeight = 16.sp, modifier = Modifier.padding(top = 4.dp)
             )
             Spacer(Modifier.height(12.dp))
             var lastGroup by remember { mutableStateOf("") }
             sources.forEach { (id, name, count, ready) ->
-                val group = when {
-                    id == "builtin" || id == "phone" -> "基础"
-                    id.startsWith("mcp_") -> "MCP 服务器"
-                    else -> "连接器"
-                }
+                val group = if (id.startsWith("mcp_")) "MCP 服务器" else "连接器"
                 if (group != lastGroup) {
                     lastGroup = group
                     Text(group, fontSize = 12.sp, color = Ink4, modifier = Modifier.padding(top = 12.dp, bottom = 4.dp))
@@ -992,15 +988,20 @@ private fun ToolPickerSheet(vm: ChatViewModel, onDismiss: () -> Unit) {
                 }
             }
             Spacer(Modifier.height(16.dp))
+            if (selected.isNotEmpty()) {
+                Text("已选 " + selected.size + " 个来源：" + selected.joinToString("、") { id -> sources.find { it.id == id }?.name ?: id },
+                    fontSize = 12.sp, color = AccentInk, lineHeight = 16.sp)
+                Spacer(Modifier.height(8.dp))
+            }
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 OutlinedButton(
-                    onClick = { vm.setEnabledTools(emptyList()); onDismiss() },
+                    onClick = { selected.clear() },
                     modifier = Modifier.weight(1f)
-                ) { Text("全部可用", color = Ink3) }
-                FilledTonalButton(
+                ) { Text("清除选择", color = Ink3) }
+                Button(
                     onClick = { vm.setEnabledTools(selected.toList()); onDismiss() },
                     modifier = Modifier.weight(1f)
-                ) { Text("应用（${selected.size} 个来源）", color = AccentInk) }
+                ) { Text(if (selected.isEmpty()) "确定（全部可用）" else "确定（${selected.size} 个来源）") }
             }
         }
     }
