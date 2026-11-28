@@ -1,0 +1,17 @@
+{
+  "id": "jina",
+  "name": "Jina Reader",
+  "category": "搜索资讯",
+  "desc": "网页正文阅读器：把任意 URL 转成干净 Markdown 文本（免费可用，填 key 提升配额）。",
+  "auth": {"type": "header", "header": "Authorization", "prefix": "Bearer ", "cred": "key", "base": "https://r.jina.ai"},
+  "credentials": [
+    {"key": "key", "label": "API Key（可选，免费也能用）", "placeholder": "jina_…（留空=免费额度）", "required": false}
+  ],
+  "tools": [
+    {
+      "name": "read_url", "desc": "读取网页并返回干净 Markdown 正文",
+      "method": "GET", "endpoint": "/{url}",
+      "params": [{"name": "url", "in": "path", "required": true, "type": "string", "desc": "要读的网页地址（含 https://）"}]
+    }
+  ]
+}

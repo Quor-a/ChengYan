@@ -1,0 +1,29 @@
+{
+  "id": "tavily",
+  "name": "Tavily 搜索",
+  "category": "搜索资讯",
+  "desc": "为 AI 设计的联网搜索 API：实时网页搜索与内容提取。key 在 tavily.com 免费注册。",
+  "auth": {"type": "bearer", "header": "Authorization", "prefix": "Bearer ", "cred": "key", "base": "https://api.tavily.com"},
+  "credentials": [
+    {"key": "key", "label": "API Key", "placeholder": "tvly-…", "required": true}
+  ],
+  "tools": [
+    {
+      "name": "search", "desc": "联网搜索，返回相关网页标题/链接/摘要",
+      "method": "POST", "endpoint": "/search",
+      "params": [
+        {"name": "query", "in": "body", "required": true, "type": "string", "desc": "搜索词"},
+        {"name": "max_results", "in": "body", "type": "number", "default": "5"}
+      ],
+      "array_path": "results",
+      "fields": ["title", "url", "content"]
+    },
+    {
+      "name": "extract", "desc": "提取指定网页的正文内容",
+      "method": "POST", "endpoint": "/extract",
+      "params": [{"name": "urls", "in": "body", "required": true, "type": "string", "desc": "网页 URL"}],
+      "array_path": "results",
+      "fields": ["url", "raw_content"]
+    }
+  ]
+}

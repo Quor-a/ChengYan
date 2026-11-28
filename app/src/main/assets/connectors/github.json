@@ -1,0 +1,53 @@
+{
+  "id": "github",
+  "name": "GitHub",
+  "category": "开发工具",
+  "desc": "连接 GitHub：搜仓库、读文件、看提交历史、建 Issue。需 PAT（repo 读取权限即可）。",
+  "auth": {"type": "bearer", "header": "Authorization", "prefix": "token ", "cred": "token", "base": "https://api.github.com"},
+  "credentials": [
+    {"key": "token", "label": "Personal Access Token", "placeholder": "ghp_…（github.com/settings/tokens）", "required": true}
+  ],
+  "tools": [
+    {
+      "name": "search_repos", "desc": "搜索 GitHub 仓库，返回名称/star/描述/地址",
+      "method": "GET", "endpoint": "/search/repositories?q={query}&per_page={limit}&sort=stars",
+      "params": [
+        {"name": "query", "in": "query", "required": true, "type": "string", "desc": "搜索关键词"},
+        {"name": "limit", "in": "query", "type": "number", "default": "5", "desc": "条数 1-20"}
+      ],
+      "array_path": "items",
+      "fields": ["full_name", "stargazers_count", "description", "html_url"]
+    },
+    {
+      "name": "get_file", "desc": "读取仓库某路径文件内容（截断 4000 字）",
+      "method": "GET", "endpoint": "/repos/{owner}/{repo}/contents/{path}",
+      "params": [
+        {"name": "owner", "in": "path", "required": true, "type": "string", "desc": "仓库属主"},
+        {"name": "repo", "in": "path", "required": true, "type": "string", "desc": "仓库名"},
+        {"name": "path", "in": "path", "required": true, "type": "string", "desc": "文件路径"}
+      ]
+    },
+    {
+      "name": "list_commits", "desc": "查看仓库最近提交历史",
+      "method": "GET", "endpoint": "/repos/{owner}/{repo}/commits?per_page={limit}",
+      "params": [
+        {"name": "owner", "in": "path", "required": true, "type": "string"},
+        {"name": "repo", "in": "path", "required": true, "type": "string"},
+        {"name": "limit", "in": "query", "type": "number", "default": "10"}
+      ],
+      "array_path": "",
+      "fields": ["sha", "commit.message"]
+    },
+    {
+      "name": "create_issue", "desc": "在仓库创建 Issue",
+      "method": "POST", "endpoint": "/repos/{owner}/{repo}/issues",
+      "params": [
+        {"name": "owner", "in": "path", "required": true, "type": "string"},
+        {"name": "repo", "in": "path", "required": true, "type": "string"},
+        {"name": "title", "in": "body", "required": true, "type": "string", "desc": "Issue 标题"},
+        {"name": "body", "in": "body", "type": "string", "desc": "Issue 正文"}
+      ],
+      "array_path": "", "fields": ["number", "title", "html_url"]
+    }
+  ]
+}

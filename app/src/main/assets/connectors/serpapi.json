@@ -1,0 +1,22 @@
+{
+  "id": "serpapi",
+  "name": "SerpAPI",
+  "category": "搜索资讯",
+  "desc": "Google/多引擎搜索结果 API（serpapi.com 注册，每月免费 100 次）。",
+  "auth": {"type": "query", "param": "api_key", "cred": "key", "base": "https://serpapi.com"},
+  "credentials": [
+    {"key": "key", "label": "API Key", "placeholder": "serpapi.com/manage-api-key", "required": true}
+  ],
+  "tools": [
+    {
+      "name": "search", "desc": "搜索引擎结果页：标题/链接/摘要",
+      "method": "GET", "endpoint": "/search?q={query}&num={limit}",
+      "params": [
+        {"name": "query", "in": "query", "required": true, "type": "string"},
+        {"name": "limit", "in": "query", "type": "number", "default": "5"}
+      ],
+      "array_path": "organic_results",
+      "fields": ["title", "link", "snippet"]
+    }
+  ]
+}

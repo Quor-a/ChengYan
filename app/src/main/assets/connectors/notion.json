@@ -1,0 +1,28 @@
+{
+  "id": "notion",
+  "name": "Notion",
+  "category": "效率办公",
+  "desc": "连接 Notion：搜索工作区页面、读取页面内容。需 Integration Token（notion.so/my-integrations，并把页面共享给集成）。",
+  "auth": {"type": "bearer", "header": "Authorization", "prefix": "Bearer ", "cred": "token", "base": "https://api.notion.com"},
+  "credentials": [
+    {"key": "token", "label": "Integration Token", "placeholder": "ntn_…", "required": true}
+  ],
+  "headers": {"Notion-Version": "2022-06-13"},
+  "tools": [
+    {
+      "name": "search_pages", "desc": "搜索工作区内你有权访问的页面",
+      "method": "POST", "endpoint": "/v1/search",
+      "params": [
+        {"name": "query", "in": "body", "type": "string", "desc": "页面标题关键词"},
+        {"name": "page_size", "in": "body", "type": "number", "default": "5"}
+      ],
+      "array_path": "results",
+      "fields": ["id", "object", "url"]
+    },
+    {
+      "name": "get_page", "desc": "读取页面属性",
+      "method": "GET", "endpoint": "/v1/pages/{page_id}",
+      "params": [{"name": "page_id", "in": "path", "required": true, "type": "string", "desc": "页面 ID（search_pages 返回）"}]
+    }
+  ]
+}

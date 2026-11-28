@@ -1,0 +1,26 @@
+{
+  "id": "qweather",
+  "name": "和风天气",
+  "category": "生活服务",
+  "desc": "和风天气开发者服务：实时天气与未来预报（dev.qweather.com 创建 key）。",
+  "auth": {"type": "query", "param": "key", "cred": "key", "base": "https://devapi.qweather.com"},
+  "credentials": [
+    {"key": "key", "label": "API Key", "placeholder": "和风天气控制台创建", "required": true}
+  ],
+  "tools": [
+    {
+      "name": "now", "desc": "城市实时天气（需 LocationID 或经纬度）",
+      "method": "GET", "endpoint": "/v7/weather/now?location={location}",
+      "params": [{"name": "location", "in": "query", "required": true, "type": "string", "desc": "LocationID 或「经度,纬度」"}],
+      "array_path": "now",
+      "fields": ["temp", "text", "windDir", "windScale", "humidity", "obsTime"]
+    },
+    {
+      "name": "forecast", "desc": "未来 3-7 天天气预报",
+      "method": "GET", "endpoint": "/v7/weather/3d?location={location}",
+      "params": [{"name": "location", "in": "query", "required": true, "type": "string"}],
+      "array_path": "daily",
+      "fields": ["fxDate", "textDay", "tempMax", "tempMin", "windDirDay"]
+    }
+  ]
+}

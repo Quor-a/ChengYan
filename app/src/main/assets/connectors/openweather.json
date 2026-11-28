@@ -1,0 +1,18 @@
+{
+  "id": "openweather",
+  "name": "OpenWeather",
+  "category": "生活服务",
+  "desc": "全球城市天气（openweathermap.org 免费 key）。",
+  "auth": {"type": "query", "param": "appid", "cred": "key", "base": "https://api.openweathermap.org"},
+  "credentials": [
+    {"key": "key", "label": "API Key", "placeholder": "openweathermap.org 注册", "required": true}
+  ],
+  "tools": [
+    {
+      "name": "current", "desc": "全球城市当前天气（城市名可用拼音/英文）",
+      "method": "GET", "endpoint": "/data/2.5/weather?q={city}&units=metric&lang=zh_cn",
+      "params": [{"name": "city", "in": "query", "required": true, "type": "string", "desc": "城市名，如 Beijing / Shanghai"}],
+      "fields": ["name", "main.temp", "weather.0.description", "main.humidity"]
+    }
+  ]
+}

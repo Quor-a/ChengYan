@@ -113,99 +113,141 @@ private fun SettingsRow(title: String, subtitle: String, onClick: () -> Unit) {
     }
 }
 
-/* ==================== 连接器（应用账号型：选应用 → 填 key → 勾选工具） ==================== */
+/* ==================== 连接器（对标 Dify：目录 → 详情，动态凭据表单 + 逐工具勾选） ==================== */
 
 @Composable
 private fun ConnectorContent(context: android.content.Context, onClose: () -> Unit) {
     var tick by remember { mutableStateOf(0) }
-    val states = remember(tick) { com.chengyan.app.net.ConnectorManager.loadAll(context) }
+    var openId by remember { mutableStateOf<String?>(null) }
+    val providers = remember(tick) { com.chengyan.app.net.ConnectorManager.catalog(context) }
+    val saved = remember(tick) { com.chengyan.app.net.ConnectorManager.loadAll(context) }
 
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
-        Text(
-            "连接器 = 连接第三方应用的账号。选择应用 → 填 key → 启用 → 勾选暴露给 AI 的工具。",
-            fontSize = 12.sp, color = Ink3, lineHeight = 17.sp,
-        )
-        Spacer(Modifier.height(12.dp))
-        com.chengyan.app.net.ConnectorManager.catalog().forEach { item ->
-            val st = states[item.id] ?: com.chengyan.app.net.ConnectorManager.Connector(id = item.id)
-            val connected = st.enabled && st.keyValue.isNotBlank()
-            var expanded by remember(item.id) { mutableStateOf(connected) }
-            var showKey by remember(item.id) { mutableStateOf(false) }
-            var keyText by remember(item.id) { mutableStateOf(st.keyValue) }
-            Surface(
-                Modifier.fillMaxWidth().padding(vertical = 5.dp),
-                shape = RoundedCornerShape(12.dp),
-                color = Paper2,
-                border = androidx.compose.foundation.BorderStroke(1.dp, Line2),
-            ) {
-                Column(Modifier.padding(14.dp)) {
-                    // 头行：点卡片展开工具勾选
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.fillMaxWidth().clickable { expanded = !expanded },
-                    ) {
-                        // 应用头像位：首字母圆徽
+    val open = openId?.let { id -> providers.find { it.id == id } }
+    if (open != null) {
+        ConnectorDetail(context, open, saved[open.id]) { openId = null }
+    } else {
+        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
+            Text(
+                "连接器目录：选择服务 → 填凭据连接 → 勾选暴露给 AI 的工具。连接后工具以 conn_ 前缀进入 AI 工具表；也可在对话框 🔧 里定向指定。",
+                fontSize = 12.sp, color = Ink3, lineHeight = 17.sp,
+            )
+            Spacer(Modifier.height(12.dp))
+            var lastCat by remember { mutableStateOf("") }
+            providers.forEach { p ->
+                if (p.category != lastCat) {
+                    lastCat = p.category
+                    Text(p.category, fontSize = 12.sp, color = Ink4, modifier = Modifier.padding(top = 12.dp, bottom = 4.dp))
+                }
+                val st = saved[p.id]
+                val ready = com.chengyan.app.net.ConnectorManager.isReady(p, st)
+                Surface(
+                    Modifier.fillMaxWidth().padding(vertical = 4.dp).clickable { openId = p.id },
+                    shape = RoundedCornerShape(12.dp),
+                    color = Paper2,
+                    border = androidx.compose.foundation.BorderStroke(1.dp, Line2),
+                ) {
+                    Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
                         Box(
-                            Modifier.size(40.dp).background(if (connected) AccentSoft else Ink.copy(alpha = 0.06f), RoundedCornerShape(10.dp)),
+                            Modifier.size(38.dp).background(if (ready) AccentSoft else Ink.copy(alpha = 0.06f), RoundedCornerShape(10.dp)),
                             contentAlignment = Alignment.Center,
                         ) {
-                            Text(item.name.firstOrNull()?.uppercase() ?: "?", fontSize = 17.sp, fontWeight = FontWeight.SemiBold, color = if (connected) AccentInk else Ink3)
+                            Text(p.name.firstOrNull()?.uppercase() ?: "?", fontSize = 16.sp, fontWeight = FontWeight.SemiBold, color = if (ready) AccentInk else Ink3)
                         }
                         Spacer(Modifier.width(12.dp))
                         Column(Modifier.weight(1f)) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
-                                Box(Modifier.size(7.dp).background(if (connected) Ok else Ink4, androidx.compose.foundation.shape.CircleShape))
+                                Box(Modifier.size(7.dp).background(if (ready) Ok else Ink4, androidx.compose.foundation.shape.CircleShape))
                                 Spacer(Modifier.width(6.dp))
-                                Text(item.name, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = Ink)
+                                Text(p.name, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = Ink)
+                                Spacer(Modifier.width(8.dp))
+                                Text("${p.tools.size} 个工具", fontSize = 11.sp, color = Ink4)
                             }
                             Text(
-                                if (connected) "已连接 · ${item.tools.size} 个工具" else if (st.keyValue.isNotBlank()) "已填 key · 未启用" else "未连接 · ${item.desc.take(26)}",
+                                if (ready) "已连接" else if (st != null && st.creds.isNotEmpty()) "凭据已填 · 未启用" else p.desc.take(40),
                                 fontSize = 11.sp, color = Ink3, maxLines = 1, overflow = TextOverflow.Ellipsis,
                             )
                         }
-                        Text(if (expanded) "收起" else "展开", fontSize = 12.sp, color = AccentInk)
+                        Text("›", fontSize = 18.sp, color = Ink4)
                     }
-                    if (expanded) {
-                        Spacer(Modifier.height(10.dp))
-                        HorizontalDivider(color = Line2)
-                        // key 输入（应用内直接填，不用弹窗）
-                        Text(item.keyLabel, fontSize = 12.sp, color = Ink3, modifier = Modifier.padding(top = 10.dp))
-                        androidx.compose.foundation.text.BasicTextField(
-                            value = keyText,
-                            onValueChange = { keyText = it },
-                            textStyle = androidx.compose.ui.text.TextStyle(fontSize = 14.sp, color = Ink),
-                            decorationBox = { inner ->
-                                Box(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.background, RoundedCornerShape(8.dp)).border(1.dp, Line2, RoundedCornerShape(8.dp)).padding(10.dp)) { inner() }
-                            },
-                            modifier = Modifier.fillMaxWidth(),
-                        )
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                            TextButton(onClick = {
-                                com.chengyan.app.net.ConnectorManager.upsert(context, st.copy(keyValue = keyText.trim(), enabled = keyText.isNotBlank()))
-                                tick++
-                            }) { Text("保存 key", color = AccentInk) }
-                            TextButton(
-                                onClick = { com.chengyan.app.net.ConnectorManager.upsert(context, st.copy(enabled = !st.enabled)); tick++ },
-                                enabled = st.keyValue.isNotBlank(),
-                            ) { Text(if (st.enabled) "停用" else "启用", color = Ink3) }
-                        }
-                        if (connected) {
-                            Text("暴露给 AI 的工具", fontSize = 12.sp, color = Ink3, modifier = Modifier.padding(vertical = 4.dp))
-                            item.tools.forEach { (tool, desc, _) ->
-                                val full = "conn_${item.id}_$tool"
-                                val on = !st.disabledTools.contains(full)
-                                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-                                    Checkbox(checked = on, onCheckedChange = {
-                                        com.chengyan.app.net.ConnectorManager.toggleTool(context, item.id, full, !it); tick++
-                                    })
-                                    Column(Modifier.weight(1f)) {
-                                        Text(tool, fontSize = 13.sp, color = Ink, fontWeight = FontWeight.Medium)
-                                        Text(desc, fontSize = 11.sp, color = Ink3, lineHeight = 14.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                                    }
-                                }
-                            }
-                        }
+                }
+            }
+            Spacer(Modifier.height(24.dp))
+        }
+    }
+}
+
+@Composable
+private fun ConnectorDetail(context: android.content.Context, p: com.chengyan.app.net.ConnectorManager.Provider, st: com.chengyan.app.net.ConnectorManager.Connector?, onBack: () -> Unit) {
+    var tick by remember { mutableStateOf(0) }
+    val cur = remember(tick) { com.chengyan.app.net.ConnectorManager.loadAll(context)[p.id] ?: com.chengyan.app.net.ConnectorManager.Connector(id = p.id) }
+    val ready = com.chengyan.app.net.ConnectorManager.isReady(p, cur)
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
+        Row(Modifier.fillMaxWidth().padding(bottom = 8.dp)) {
+            Text("‹ 返回目录", fontSize = 13.sp, color = AccentInk, modifier = Modifier.clickable { onBack() })
+        }
+        // 头卡：身份 + 启用
+        Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp), color = Paper2, border = androidx.compose.foundation.BorderStroke(1.dp, Line2)) {
+            Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.size(46.dp).background(if (ready) AccentSoft else Ink.copy(alpha = 0.06f), RoundedCornerShape(12.dp)), contentAlignment = Alignment.Center) {
+                    Text(p.name.firstOrNull()?.uppercase() ?: "?", fontSize = 19.sp, fontWeight = FontWeight.SemiBold, color = if (ready) AccentInk else Ink3)
+                }
+                Spacer(Modifier.width(14.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(p.name, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, color = Ink)
+                    Text(if (ready) "已连接" else "未连接", fontSize = 12.sp, color = if (ready) Ok else Ink4)
+                }
+                TextButton(
+                    onClick = { com.chengyan.app.net.ConnectorManager.upsert(context, cur.copy(enabled = !cur.enabled)); tick++ },
+                    enabled = p.credentials.filter { it.required }.all { cur.creds[it.key]?.isNotBlank() == true },
+                ) { Text(if (cur.enabled) "停用" else "启用", color = if (ready) AccentInk else Ink4) }
+            }
+        }
+        Text(p.desc, fontSize = 12.sp, color = Ink3, lineHeight = 17.sp, modifier = Modifier.padding(top = 10.dp))
+        Spacer(Modifier.height(14.dp))
+
+        // 凭据表单（按清单动态生成）
+        Text("凭据", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = Ink)
+        var draft by remember(p.id) { mutableStateOf(cur.creds.toMutableMap()) }
+        p.credentials.forEach { f ->
+            Text(f.label + if (f.required) " *" else "", fontSize = 12.sp, color = Ink3, modifier = Modifier.padding(top = 10.dp))
+            androidx.compose.foundation.text.BasicTextField(
+                value = draft[f.key] ?: f.def,
+                onValueChange = { draft[f.key] = it; draft = draft.toMutableMap() },
+                textStyle = androidx.compose.ui.text.TextStyle(fontSize = 14.sp, color = Ink),
+                decorationBox = { inner ->
+                    Box(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.background, RoundedCornerShape(8.dp)).border(1.dp, Line2, RoundedCornerShape(8.dp)).padding(10.dp)) {
+                        if ((draft[f.key] ?: f.def).isBlank()) Text(f.placeholder, fontSize = 12.sp, color = Ink4)
+                        inner()
                     }
+                },
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+        if (p.credentials.isNotEmpty()) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                TextButton(onClick = {
+                    val clean = draft.filterValues { it.isNotBlank() }
+                    com.chengyan.app.net.ConnectorManager.upsert(context, cur.copy(creds = clean, enabled = clean.isNotEmpty()))
+                    tick++
+                }) { Text("保存并启用", color = AccentInk) }
+            }
+        }
+        Spacer(Modifier.height(10.dp))
+        HorizontalDivider(color = Line2)
+
+        // 工具清单（逐工具勾选暴露）
+        Text("暴露给 AI 的工具", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = Ink, modifier = Modifier.padding(vertical = 8.dp))
+        if (!ready) Text("连接后可勾选", fontSize = 12.sp, color = Ink4)
+        p.tools.forEach { t ->
+            val full = "conn_${p.id}_${t.name}"
+            val on = ready && !cur.disabledTools.contains(full)
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                Checkbox(checked = on, onCheckedChange = {
+                    com.chengyan.app.net.ConnectorManager.toggleTool(context, p.id, full, !it); tick++
+                }, enabled = ready)
+                Column(Modifier.weight(1f)) {
+                    Text(t.name, fontSize = 13.sp, color = Ink, fontWeight = FontWeight.Medium)
+                    Text(t.desc, fontSize = 11.sp, color = Ink3, lineHeight = 14.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
                 }
             }
         }
