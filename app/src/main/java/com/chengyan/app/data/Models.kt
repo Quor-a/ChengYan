@@ -114,6 +114,7 @@ data class Conversation(
     var updated: Long = created,
     var assistantName: String? = null,
     var soulId: String = "",             // 该对话绑定的灵魂卡 id（ZorvAI：每个对话记住自己的人格）
+    var enabledTools: List<String> = emptyList(), // 对话内定向选择的工具（空=全部可用；选择后 AI 仅用这些）
     val messages: MutableList<Message> = mutableListOf()
 )
 

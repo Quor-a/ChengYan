@@ -66,6 +66,7 @@ class OpenAiClient {
         config: ModelConfig,
         history: List<ChatTurn>,
         context: android.content.Context? = null,
+        enabledTools: Set<String>? = null, // 对话内定向选择（非空时 tools 只下发这些）
     ): Flow<StreamEvent> = callbackFlow {
         // 🔴 丢字修复见下方 onEvent：trySend 改 trySendBlocking（默认 channel 容量 64，
         //    消费慢时 trySend 静默失败 → 长回复掉 token）
@@ -81,10 +82,23 @@ class OpenAiClient {
             }
             // 内置工具定义（可在设置中关闭 —— 对齐 ZorvAI QuroModelConfig.enableTools）
             if (config.enableTools) put("tools", kotlinx.serialization.json.buildJsonArray {
-                Tools.definitionsJson().forEach { add(it) }
-                PhoneTools.definitionsJson().forEach { add(it) }
-                McpManager.definitionsJson(context ?: return@buildJsonArray).forEach { add(it) }
-                ConnectorManager.definitionsJson(context ?: return@buildJsonArray).forEach { add(it) }
+                val all = buildList {
+                    Tools.definitionsJson().forEach { add(it) }
+                    PhoneTools.definitionsJson().forEach { add(it) }
+                    McpManager.definitionsJson(context ?: return@buildJsonArray).forEach { add(it) }
+                    ConnectorManager.definitionsJson(context ?: return@buildJsonArray).forEach { add(it) }
+                }
+                // 定向选择：用户在对话框勾选了工具 → 只暴露这些（对标 LibreChat agent / LobeChat 工具选择器）
+                val allowed = enabledTools
+                all.forEach { d ->
+                    if (allowed == null) add(d)
+                    else {
+                        val n = (d as? kotlinx.serialization.json.JsonObject)
+                            ?.get("function")?.let { f -> (f as? kotlinx.serialization.json.JsonObject)?.get("name") }
+                            ?.let { n -> (n as? kotlinx.serialization.json.JsonPrimitive)?.content }
+                        if (n != null && n in allowed) add(d)
+                    }
+                }
             })
             // 输出 token 上限（>0 时下发，本地/部分兼容端点可设为 0 关闭）
             if (config.maxTokens > 0) put("max_tokens", config.maxTokens)

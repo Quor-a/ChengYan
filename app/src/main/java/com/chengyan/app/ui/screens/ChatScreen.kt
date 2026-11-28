@@ -30,6 +30,7 @@ import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.AddPhotoAlternate
 import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.AttachFile
+import androidx.compose.material.icons.rounded.Handyman
 import androidx.compose.material.icons.rounded.Menu
 import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.Tune
@@ -498,16 +499,6 @@ private fun ConversationDrawer(
             Modifier.padding(horizontal = 16.dp).fillMaxWidth(),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            // 设置入口：模型/对话/连接器/MCP/系统能力统一从这里进
-            Row(
-                Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
-                    .background(Ink.copy(alpha = 0.06f)).clickable(onClick = onOpenSettings).padding(12.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Icon(Icons.Rounded.Settings, null, Modifier.size(18.dp), tint = Ink2)
-                Spacer(Modifier.width(10.dp))
-                Text("设置", fontSize = 14.sp, color = Ink, fontWeight = FontWeight.Medium)
-            }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 Row(
                     Modifier.weight(1f).clip(RoundedCornerShape(12.dp)).background(AccentSoft)
@@ -595,6 +586,14 @@ private fun ConversationDrawer(
                         modifier = Modifier.fillMaxWidth().padding(vertical = 24.dp),
                         textAlign = TextAlign.Center)
                 }
+            }
+        }
+
+        // 左下角设置图标（小图标入口，非长条）
+        Spacer(Modifier.weight(1f))
+        Row(Modifier.fillMaxWidth().padding(start = 12.dp, bottom = 14.dp)) {
+            IconButton(onClick = onOpenSettings, Modifier.size(40.dp)) {
+                Icon(Icons.Rounded.Settings, "设置", Modifier.size(22.dp), tint = Ink2)
             }
         }
     }
@@ -823,6 +822,10 @@ private fun ComposerBar(vm: ChatViewModel) {
     val pickFile = androidx.activity.compose.rememberLauncherForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.GetContent()
     ) { uri -> if (uri != null) addUri(uri) }
+    var showToolPicker by remember { mutableStateOf(false) }
+    if (showToolPicker) {
+        ToolPickerSheet(vm, onDismiss = { showToolPicker = false })
+    }
 
     fun doSend() {
         val imgs = pending.filter { it.type == "image" && it.base64 != null }.map { it.base64!! }
@@ -836,6 +839,25 @@ private fun ComposerBar(vm: ChatViewModel) {
 
     Surface(color = MaterialTheme.colorScheme.background) {
         Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+            // 已选定向工具胶囊（对标 LobeChat：选中工具显示在输入框上方，随请求生效）
+            if (vm.current?.enabledTools.orEmpty().isNotEmpty()) {
+                Row(
+                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(bottom = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    vm.current!!.enabledTools.forEach { t ->
+                        Surface(shape = RoundedCornerShape(14.dp), color = AccentSoft,
+                            border = androidx.compose.foundation.BorderStroke(1.dp, Accent.copy(alpha = 0.3f))) {
+                            Text("⚙ " + t, fontSize = 11.sp, color = AccentInk,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp))
+                        }
+                    }
+                    Text("仅用这些", fontSize = 10.sp, color = Ink4)
+                    Text("清除", fontSize = 11.sp, color = AccentInk,
+                        modifier = Modifier.clickable { vm.setEnabledTools(emptyList()) })
+                }
+            }
             Surface(
                 shape = RoundedCornerShape(18.dp), color = Card,
                 border = androidx.compose.foundation.BorderStroke(1.5.dp, Line)
@@ -876,6 +898,14 @@ private fun ComposerBar(vm: ChatViewModel) {
                         IconButton(onClick = { pickFile.launch("*/*") }) {
                             Icon(Icons.Rounded.AttachFile, "添加文档/文件", tint = Ink3)
                         }
+                        // 工具选择器：勾选本对话暴露给 AI 的工具（内置/手机/MCP/连接器）
+                        val toolsOn = vm.current?.enabledTools.orEmpty().isNotEmpty()
+                        IconButton(onClick = { showToolPicker = true }) {
+                            Icon(
+                                Icons.Rounded.Handyman, "选择工具", tint = if (toolsOn) Accent else Ink3,
+                                modifier = Modifier.size(22.dp)
+                            )
+                        }
                         Text("Enter 发送", style = MaterialTheme.typography.labelSmall, color = Ink4)
                         Spacer(Modifier.weight(1f))
                         if (vm.streaming) {
@@ -893,6 +923,56 @@ private fun ComposerBar(vm: ChatViewModel) {
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+/** 附件预览 chip：图片缩略图、视频/音频图标、文档名称。 */
+@Composable
+private fun ToolPickerSheet(vm: ChatViewModel, onDismiss: () -> Unit) {
+    val all = remember { vm.availableToolDescriptors() }
+    val selected = remember { mutableStateListOf<String>().apply { addAll(vm.current?.enabledTools.orEmpty()) } }
+    androidx.compose.material3.ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp).padding(bottom = 24.dp)) {
+            Text("选择工具", fontSize = 18.sp, fontWeight = FontWeight.SemiBold, color = Ink)
+            Text(
+                "勾选后本对话 AI 只使用所选工具（不选=全部可用）。可只勾一个 MCP/连接器工具定向执行。",
+                fontSize = 12.sp, color = Ink3, lineHeight = 16.sp, modifier = Modifier.padding(top = 4.dp)
+            )
+            Spacer(Modifier.height(10.dp))
+            var lastGroup by remember { mutableStateOf("") }
+            all.forEach { (name, desc, group) ->
+                if (group != lastGroup) {
+                    lastGroup = group
+                    Text(group, fontSize = 12.sp, color = Ink4, modifier = Modifier.padding(top = 10.dp, bottom = 2.dp))
+                }
+                val on = name in selected
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxWidth().clickable {
+                        if (on) selected.remove(name) else selected.add(name)
+                    }
+                ) {
+                    Checkbox(checked = on, onCheckedChange = {
+                        if (it) selected.add(name) else selected.remove(name)
+                    })
+                    Column(Modifier.weight(1f)) {
+                        Text(name, fontSize = 13.sp, color = Ink, fontWeight = FontWeight.Medium)
+                        if (desc.isNotBlank()) Text(desc, fontSize = 11.sp, color = Ink3, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                }
+            }
+            Spacer(Modifier.height(14.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                OutlinedButton(
+                    onClick = { vm.setEnabledTools(emptyList()); onDismiss() },
+                    modifier = Modifier.weight(1f)
+                ) { Text("全部可用", color = Ink3) }
+                FilledTonalButton(
+                    onClick = { vm.setEnabledTools(selected.toList()); onDismiss() },
+                    modifier = Modifier.weight(1f)
+                ) { Text("应用（${selected.size} 个工具）", color = AccentInk) }
             }
         }
     }

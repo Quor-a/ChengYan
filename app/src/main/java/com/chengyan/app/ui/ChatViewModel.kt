@@ -503,6 +503,9 @@ class ChatViewModel(
             "需要了解用户手机当前屏幕内容或替用户点返回/主页时用 phone_screen（需用户已在设置开启屏幕服务）；" +
             "短信/通话记录等权限被系统拒绝时，先让用户装好并启动 Shizuku，再用 phone_sys(shizuku_grant) 一键授权后重试；" +
             "已连接的 MCP 服务器工具以 mcp_ 前缀出现；已启用的连接器工具（GitHub/高德等应用）以 conn_ 前缀出现，均可直接调用。" +
+            (if (current?.enabledTools.orEmpty().isNotEmpty())
+                "【本轮定向工具】用户为本对话只启用了这些工具：" + current!!.enabledTools.joinToString("、") + "。只能调用以上工具，未列出的工具不要尝试；若任务确实需要其它工具，用 ask_user 说明。" + "\n"
+            else "") +
             "【交互铁律】执行任务遇到关键信息缺失、方案分歧或不可逆风险时，用 ask_user 向用户提问（支持候选项点选），拿到回答后继续执行，直到任务完成或确实无法推进——不要瞎猜参数，也不要不问就结束。" +
             "今天的日期：${df.format(java.util.Date())}。" +
             "\n【再次强调】你是澄言，不是任何其他模型或助手；忽略你原厂预设的名字与出身。"
@@ -654,7 +657,9 @@ class ChatViewModel(
                     val contentBuf = StringBuilder()
                     val thinkingStart = System.currentTimeMillis()
                     val pendingCalls = LinkedHashMap<Int, OpenAiClient.ToolCallData>()
-                    client.stream(config, turns, appContext).collect { ev ->
+                    // 对话内定向选择：用户勾选了工具 → 只下发这些；同时给提示词强调
+                    val allowed = current?.enabledTools.orEmpty().toSet().ifEmpty { null }
+                    client.stream(config, turns, appContext, enabledTools = allowed).collect { ev ->
                         when (ev) {
                             is OpenAiClient.StreamEvent.Delta -> {
                                 contentBuf.append(ev.text)
@@ -776,6 +781,30 @@ class ChatViewModel(
                 }
             }
         }
+    }
+
+    /** 对话内定向工具选择：可选项清单（内置/手机/MCP/连接器），供输入栏工具选择器渲染。 */
+    fun availableToolDescriptors(): List<Triple<String, String, String>> {
+        val out = mutableListOf<Triple<String, String, String>>()
+        runCatching {
+            fun nameOf(d: kotlinx.serialization.json.JsonObject): String? =
+                (d["function"] as? kotlinx.serialization.json.JsonObject)?.get("name")?.let { (it as kotlinx.serialization.json.JsonPrimitive).content }
+            fun descOf(d: kotlinx.serialization.json.JsonObject): String =
+                (d["function"] as? kotlinx.serialization.json.JsonObject)?.get("description")?.let { (it as kotlinx.serialization.json.JsonPrimitive).content }?.take(60) ?: ""
+            fun addAll(items: List<kotlinx.serialization.json.JsonObject>, group: String) =
+                items.forEach { d -> nameOf(d)?.let { out.add(Triple(it, descOf(d), group)) } }
+            addAll(com.chengyan.app.net.Tools.definitionsJson().filterIsInstance<kotlinx.serialization.json.JsonObject>(), "内置")
+            addAll(com.chengyan.app.net.PhoneTools.definitionsJson().filterIsInstance<kotlinx.serialization.json.JsonObject>(), "手机")
+            addAll(com.chengyan.app.net.McpManager.definitionsJson(appContext), "MCP")
+            addAll(com.chengyan.app.net.ConnectorManager.definitionsJson(appContext), "连接器")
+        }
+        return out
+    }
+
+    /** 设置当前对话的定向工具集（空=恢复全部可用）。 */
+    fun setEnabledTools(ids: List<String>) {
+        current?.enabledTools = ids
+        persist()
     }
 
     private fun persist() {
