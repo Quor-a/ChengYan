@@ -131,7 +131,59 @@ fun SettingsScreen(
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 18.dp, vertical = 8.dp)
         ) {
-            // ====== 01 服务商（SettingsSelectorRow + ApiProviderDialogWithCustom） ======
+            // ====== 01 我的模型（已保存档案：点按即切换使用，对标 zorv AI） ======
+            ChapterLabel("01", "我的模型", profiles.size.toString())
+            if (profiles.isEmpty()) {
+                Text(
+                    "还没有保存的模型档案。在下方填好服务商 / 密钥 / 模型后，点「保存为新档案」，之后在这里点一下即可切换。",
+                    style = MaterialTheme.typography.bodySmall, color = Ink3, lineHeight = 18.sp,
+                )
+            } else {
+                profiles.forEach { profile ->
+                    val inUse = profile.provider == cfg.provider && profile.model == cfg.model &&
+                        profile.baseUrl == cfg.baseUrl && profile.apiKey == cfg.apiKey
+                    Card(
+                        onClick = { vm.applyQuroProfile(profile); cfg = vm.quroConfig },
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+                        colors = CardDefaults.cardColors(containerColor = if (inUse) Paper2 else MaterialTheme.colorScheme.background),
+                    ) {
+                        Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                            ProviderAvatar(profile.name.ifBlank { "?" }.firstOrNull()?.uppercase() ?: "?", 34.dp)
+                            Spacer(Modifier.width(12.dp))
+                            Column(Modifier.weight(1f)) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(profile.name, style = MaterialTheme.typography.bodyLarge)
+                                    if (inUse) {
+                                        Spacer(Modifier.width(8.dp))
+                                        Text("使用中", fontSize = 11.sp, color = AccentInk, fontWeight = FontWeight.Medium)
+                                    }
+                                }
+                                Text(
+                                    "${profile.provider} · ${profile.model.ifBlank { "?" }}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = Ink3, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                            IconButton(onClick = {
+                                editingProfile = profile
+                                editProfileName = profile.name
+                                showEditProfileDialog = true
+                            }) { Icon(Icons.Filled.Edit, "编辑", Modifier.size(18.dp), tint = AccentInk) }
+                            IconButton(onClick = { vm.deleteQuroProfile(profile.id) }) {
+                                Icon(Icons.Filled.Delete, "删除", Modifier.size(18.dp), tint = Err)
+                            }
+                        }
+                    }
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+            androidx.compose.material3.OutlinedButton(
+                onClick = { showSaveDialog = true },
+                modifier = Modifier.fillMaxWidth().height(44.dp),
+            ) { Text("把当前配置保存为新档案", fontSize = 14.sp, color = AccentInk) }
+            Spacer(Modifier.height(18.dp))
+
+            // ====== 02 服务商（SettingsSelectorRow + ApiProviderDialogWithCustom） ======
             ChapterLabel("02", "服务商")
             SettingsSelectorRow(
                 title = "服务商",
@@ -259,47 +311,6 @@ fun SettingsScreen(
             }
             Spacer(Modifier.height(22.dp))
 
-            // ====== 已保存预设（QuroSavedProfileRepository） ======
-            if (profiles.isNotEmpty()) {
-                ChapterLabel("05", "已保存预设", profiles.size.toString())
-                profiles.forEach { profile ->
-                    Card(Modifier.fillMaxWidth().padding(vertical = 2.dp), colors = CardDefaults.cardColors(containerColor = Paper2)) {
-                        Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                            ProviderAvatar(profile.name.ifBlank { "?" }.firstOrNull()?.uppercase() ?: "?", 34.dp)
-                            Spacer(Modifier.width(12.dp))
-                            Column(Modifier.weight(1f)) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    val dot = when (providerHealth[profile.id]) { "HEALTHY" -> Ok; "FAILED" -> Err; else -> Ink4 }
-                                    Box(Modifier.size(7.dp).background(dot, CircleShape))
-                                    Spacer(Modifier.width(6.dp))
-                                    Text(profile.name, style = MaterialTheme.typography.bodyLarge)
-                                }
-                                Text(
-                                    "${profile.provider} · ${profile.model.ifBlank { "?" }} · ${profile.baseUrl}",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = Ink3, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                                )
-                            }
-                            IconButton(onClick = {
-                                editingProfile = profile
-                                editProfileName = profile.name
-                                showEditProfileDialog = true
-                            }) { Icon(Icons.Filled.Edit, "编辑", Modifier.size(18.dp), tint = AccentInk) }
-                            TextButton(onClick = { vm.applyQuroProfile(profile) }) { Text("应用") }
-                            IconButton(onClick = { vm.deleteQuroProfile(profile.id) }) {
-                                Icon(Icons.Filled.Delete, "删除", Modifier.size(18.dp), tint = Err)
-                            }
-                        }
-                    }
-                }
-                Spacer(Modifier.height(16.dp))
-            }
-
-            // ====== 06 系统能力（无障碍 / Shizuku）======
-            ChapterLabel("06", "系统能力")
-            SystemCapabilitySection(context)
-
-            Spacer(Modifier.height(16.dp))
         }
     }
 
@@ -434,7 +445,7 @@ fun SettingsScreen(
  *    那两张卡是纯检测型死 UI——检测了永远不会被使用的能力，即「根本不能用」。
  */
 @Composable
-private fun SystemCapabilitySection(context: android.content.Context) {
+fun SystemCapabilitySection(context: android.content.Context) {
     var states by remember { mutableStateOf(mapOf<String, Boolean>()) }
     fun refresh() {
         states = listOf(

@@ -83,6 +83,7 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit, onOpenPrefs: () ->
     val clipboard = LocalClipboardManager.current
         var confirmClear by remember { mutableStateOf(false) }
     var phoneDialog by remember { mutableStateOf(false) }
+    var sysCapOpen by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { if (!vm.phoneAsked) phoneDialog = true }
     val permLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions()
@@ -193,13 +194,13 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit, onOpenPrefs: () ->
                                 leadingIcon = { Text("✦", fontSize = 15.sp, color = AccentInk) },
                             )
                             DropdownMenuItem(
-                                text = { Text("对话设置（提示词/思考）", fontSize = 14.sp) },
+                                text = { Text("对话设置", fontSize = 14.sp) },
                                 onClick = { menuOpen = false; onOpenPrefs() },
                                 leadingIcon = { Icon(Icons.Rounded.Tune, null, Modifier.size(17.dp), tint = Ink3) },
                             )
                             DropdownMenuItem(
-                                text = { Text("手机能力授权", fontSize = 14.sp) },
-                                onClick = { menuOpen = false; phoneDialog = true },
+                                text = { Text("系统能力与权限", fontSize = 14.sp) },
+                                onClick = { menuOpen = false; sysCapOpen = true },
                                 leadingIcon = { Icon(Icons.Rounded.PhoneAndroid, null, Modifier.size(17.dp), tint = Ink3) },
                             )
                             DropdownMenuItem(
@@ -318,6 +319,35 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit, onOpenPrefs: () ->
                 TextButton(onClick = { phoneDialog = false; vm.markPhoneAsked() }) { Text("暂不", color = Ink2) }
             }
         )
+    }
+
+    // 系统能力与权限：全屏弹层（手机权限 / 无障碍屏幕服务 / Shizuku）
+    if (sysCapOpen) {
+        androidx.compose.ui.window.Dialog(
+            onDismissRequest = { sysCapOpen = false },
+            properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false),
+        ) {
+            androidx.compose.material3.Surface(
+                modifier = Modifier.fillMaxSize(),
+                color = MaterialTheme.colorScheme.background,
+            ) {
+                Column(
+                    Modifier.fillMaxSize().padding(horizontal = 18.dp, vertical = 8.dp)
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                        Text(
+                            "系统能力与权限",
+                            fontFamily = FontFamily.Serif, fontWeight = FontWeight.SemiBold, fontSize = 20.sp,
+                            modifier = Modifier.weight(1f),
+                        )
+                        androidx.compose.material3.TextButton(onClick = { sysCapOpen = false }) { Text("完成", color = AccentInk) }
+                    }
+                    Spacer(Modifier.height(10.dp))
+                    SystemCapabilitySection(context)
+                }
+            }
+        }
     }
 
     // 灵魂注入：底部弹层（选卡开新对话）+ 全屏编辑器
