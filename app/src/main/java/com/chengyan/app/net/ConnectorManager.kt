@@ -142,6 +142,14 @@ object ConnectorManager {
     fun isReady(p: Provider, c: Connector?): Boolean =
         c != null && c.enabled && p.credentials.filter { it.required }.all { c.creds[it.key]?.isNotBlank() == true }
 
+    /** 指定连接器的工具全名列表（含逐工具开关过滤；未连接返回空）。 */
+    fun toolNamesFor(ctx: Context, id: String): List<String> {
+        val p = catalog(ctx).find { it.id == id } ?: return emptyList()
+        val c = loadAll(ctx)[id] ?: return emptyList()
+        if (!isReady(p, c)) return emptyList()
+        return p.tools.map { "conn_${p.id}_${it.name}" }.filter { it !in c.disabledTools }
+    }
+
     // ---------- 并入 AI 工具表（仅已连接的 provider） ----------
 
     fun definitionsJson(ctx: Context): List<kotlinx.serialization.json.JsonObject> {

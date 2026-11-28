@@ -504,7 +504,7 @@ class ChatViewModel(
             "短信/通话记录等权限被系统拒绝时，先让用户装好并启动 Shizuku，再用 phone_sys(shizuku_grant) 一键授权后重试；" +
             "已连接的 MCP 服务器工具以 mcp_ 前缀出现；已启用的连接器工具（GitHub/高德等应用）以 conn_ 前缀出现，均可直接调用。" +
             (if (current?.enabledTools.orEmpty().isNotEmpty())
-                "【本轮定向工具】用户为本对话只启用了这些工具：" + current!!.enabledTools.joinToString("、") + "。只能调用以上工具，未列出的工具不要尝试；若任务确实需要其它工具，用 ask_user 说明。" + "\n"
+                "【本轮能力定向】用户为本对话只启用了这些能力来源：" + current!!.enabledTools.joinToString("、") + "。只能调用这些来源下的工具，未列出的来源（包括其它 MCP/连接器）不要尝试；若任务确实需要其它工具，用 ask_user 说明。" + "\n"
             else "") +
             "【交互铁律】执行任务遇到关键信息缺失、方案分歧或不可逆风险时，用 ask_user 向用户提问（支持候选项点选），拿到回答后继续执行，直到任务完成或确实无法推进——不要瞎猜参数，也不要不问就结束。" +
             "今天的日期：${df.format(java.util.Date())}。" +
@@ -657,9 +657,9 @@ class ChatViewModel(
                     val contentBuf = StringBuilder()
                     val thinkingStart = System.currentTimeMillis()
                     val pendingCalls = LinkedHashMap<Int, OpenAiClient.ToolCallData>()
-                    // 对话内定向选择：用户勾选了工具 → 只下发这些；同时给提示词强调
-                    val allowed = current?.enabledTools.orEmpty().toSet().ifEmpty { null }
-                    client.stream(config, turns, appContext, enabledTools = allowed).collect { ev ->
+                    // 对话内定向选择：用户选了能力来源（MCP/连接器/内置/手机）→ 展开为工具名集合
+                    val allowedSet = current?.enabledTools.orEmpty().takeIf { it.isNotEmpty() }?.let { expandSources(it) }
+                    client.stream(config, turns, appContext, enabledTools = allowedSet?.ifEmpty { null }).collect { ev ->
                         when (ev) {
                             is OpenAiClient.StreamEvent.Delta -> {
                                 contentBuf.append(ev.text)
@@ -783,25 +783,43 @@ class ChatViewModel(
         }
     }
 
-    /** 对话内定向工具选择：可选项清单（内置/手机/MCP/连接器），供输入栏工具选择器渲染。 */
-    fun availableToolDescriptors(): List<Triple<String, String, String>> {
-        val out = mutableListOf<Triple<String, String, String>>()
+    /** 对话内能力来源选择：可选项（内置/手机/MCP 服务器/连接器），单位=来源而非单个工具。 */
+    fun availableSources(): List<Triple<String, String, Int>> { // (来源id, 名称, 工具数)
+        val out = mutableListOf<Triple<String, String, Int>>()
         runCatching {
-            fun nameOf(d: kotlinx.serialization.json.JsonObject): String? =
-                (d["function"] as? kotlinx.serialization.json.JsonObject)?.get("name")?.let { (it as kotlinx.serialization.json.JsonPrimitive).content }
-            fun descOf(d: kotlinx.serialization.json.JsonObject): String =
-                (d["function"] as? kotlinx.serialization.json.JsonObject)?.get("description")?.let { (it as kotlinx.serialization.json.JsonPrimitive).content }?.take(60) ?: ""
-            fun addAll(items: List<kotlinx.serialization.json.JsonObject>, group: String) =
-                items.forEach { d -> nameOf(d)?.let { out.add(Triple(it, descOf(d), group)) } }
-            addAll(com.chengyan.app.net.Tools.definitionsJson().filterIsInstance<kotlinx.serialization.json.JsonObject>(), "内置")
-            addAll(com.chengyan.app.net.PhoneTools.definitionsJson().filterIsInstance<kotlinx.serialization.json.JsonObject>(), "手机")
-            addAll(com.chengyan.app.net.McpManager.definitionsJson(appContext), "MCP")
-            addAll(com.chengyan.app.net.ConnectorManager.definitionsJson(appContext), "连接器")
+            fun nameOf(d: kotlinx.serialization.json.JsonElement?): String? =
+                (d as? kotlinx.serialization.json.JsonObject)?.get("function")?.let { f -> (f as? kotlinx.serialization.json.JsonObject)?.get("name") }?.let { n -> (n as? kotlinx.serialization.json.JsonPrimitive)?.content }
+            out.add(Triple("builtin", "内置工具", com.chengyan.app.net.Tools.definitionsJson().mapNotNull { nameOf(it) }.size))
+            out.add(Triple("phone", "手机能力", com.chengyan.app.net.PhoneTools.definitionsJson().mapNotNull { nameOf(it) }.size))
+            com.chengyan.app.net.McpManager.loadAll(appContext)
+                .filter { it.enabled && com.chengyan.app.net.McpManager.toolNamesFor(appContext, it.id).isNotEmpty() }
+                .forEach { out.add(Triple("mcp_" + it.id, it.name, com.chengyan.app.net.McpManager.toolNamesFor(appContext, it.id).size)) }
+            com.chengyan.app.net.ConnectorManager.catalog(appContext)
+                .filter { com.chengyan.app.net.ConnectorManager.toolNamesFor(appContext, it.id).isNotEmpty() }
+                .forEach { out.add(Triple("conn_" + it.id, it.name, com.chengyan.app.net.ConnectorManager.toolNamesFor(appContext, it.id).size)) }
         }
         return out
     }
 
-    /** 设置当前对话的定向工具集（空=恢复全部可用）。 */
+    /** 来源 id 集合 → 展开为具体工具全名集合（供 tools 过滤）。 */
+    fun expandSources(ids: List<String>): Set<String> {
+        val out = mutableSetOf<String>()
+        runCatching {
+            fun nameOf(d: kotlinx.serialization.json.JsonElement?): String? =
+                (d as? kotlinx.serialization.json.JsonObject)?.get("function")?.let { f -> (f as? kotlinx.serialization.json.JsonObject)?.get("name") }?.let { n -> (n as? kotlinx.serialization.json.JsonPrimitive)?.content }
+            ids.forEach { id ->
+                when {
+                    id == "builtin" -> out += com.chengyan.app.net.Tools.definitionsJson().mapNotNull { nameOf(it) }
+                    id == "phone" -> out += com.chengyan.app.net.PhoneTools.definitionsJson().mapNotNull { nameOf(it) }
+                    id.startsWith("mcp_") -> out += com.chengyan.app.net.McpManager.toolNamesFor(appContext, id.removePrefix("mcp_"))
+                    id.startsWith("conn_") -> out += com.chengyan.app.net.ConnectorManager.toolNamesFor(appContext, id.removePrefix("conn_"))
+                }
+            }
+        }
+        return out
+    }
+
+    /** 设置当前对话的能力来源集（空=全部可用）。 */
     fun setEnabledTools(ids: List<String>) {
         current?.enabledTools = ids
         persist()

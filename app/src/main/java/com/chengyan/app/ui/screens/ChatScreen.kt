@@ -847,13 +847,17 @@ private fun ComposerBar(vm: ChatViewModel) {
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     vm.current!!.enabledTools.forEach { t ->
+                        val label = when (t) {
+                            "builtin" -> "内置工具"; "phone" -> "手机能力"
+                            else -> t.removePrefix("mcp_").removePrefix("conn_")
+                        }
                         Surface(shape = RoundedCornerShape(14.dp), color = AccentSoft,
                             border = androidx.compose.foundation.BorderStroke(1.dp, Accent.copy(alpha = 0.3f))) {
-                            Text("⚙ " + t, fontSize = 11.sp, color = AccentInk,
+                            Text("⚙ " + label, fontSize = 11.sp, color = AccentInk,
                                 modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp))
                         }
                     }
-                    Text("仅用这些", fontSize = 10.sp, color = Ink4)
+                    Text("仅用这些来源", fontSize = 10.sp, color = Ink4)
                     Text("清除", fontSize = 11.sp, color = AccentInk,
                         modifier = Modifier.clickable { vm.setEnabledTools(emptyList()) })
                 }
@@ -928,42 +932,63 @@ private fun ComposerBar(vm: ChatViewModel) {
     }
 }
 
-/** 附件预览 chip：图片缩略图、视频/音频图标、文档名称。 */
+/** 能力来源选择（对标 LobeChat 工具选择 ActionBar）：单位=MCP 服务器/连接器/内置组，卡片式。 */
 @Composable
 private fun ToolPickerSheet(vm: ChatViewModel, onDismiss: () -> Unit) {
-    val all = remember { vm.availableToolDescriptors() }
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val sources = remember { vm.availableSources() }
     val selected = remember { mutableStateListOf<String>().apply { addAll(vm.current?.enabledTools.orEmpty()) } }
     androidx.compose.material3.ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp).padding(bottom = 24.dp)) {
-            Text("选择工具", fontSize = 18.sp, fontWeight = FontWeight.SemiBold, color = Ink)
+            Text("能力来源", fontSize = 18.sp, fontWeight = FontWeight.SemiBold, color = Ink)
             Text(
-                "勾选后本对话 AI 只使用所选工具（不选=全部可用）。可只勾一个 MCP/连接器工具定向执行。",
+                "点选本次对话让 AI 用哪些来源：不选=全部可用；选中一个 MCP 服务器或连接器，AI 就只用它的工具干活。",
                 fontSize = 12.sp, color = Ink3, lineHeight = 16.sp, modifier = Modifier.padding(top = 4.dp)
             )
-            Spacer(Modifier.height(10.dp))
+            Spacer(Modifier.height(12.dp))
             var lastGroup by remember { mutableStateOf("") }
-            all.forEach { (name, desc, group) ->
+            sources.forEach { (id, name, count) ->
+                val group = when {
+                    id == "builtin" -> "基础"
+                    id == "phone" -> "基础"
+                    id.startsWith("mcp_") -> "MCP 服务器"
+                    else -> "连接器"
+                }
                 if (group != lastGroup) {
                     lastGroup = group
-                    Text(group, fontSize = 12.sp, color = Ink4, modifier = Modifier.padding(top = 10.dp, bottom = 2.dp))
+                    Text(group, fontSize = 12.sp, color = Ink4, modifier = Modifier.padding(top = 12.dp, bottom = 4.dp))
                 }
-                val on = name in selected
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.fillMaxWidth().clickable {
-                        if (on) selected.remove(name) else selected.add(name)
-                    }
+                val on = id in selected
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = if (on) AccentSoft else Paper2,
+                    border = androidx.compose.foundation.BorderStroke(if (on) 1.5.dp else 1.dp, if (on) Accent else Line),
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp).clickable {
+                        if (on) selected.remove(id) else selected.add(id)
+                    },
                 ) {
-                    Checkbox(checked = on, onCheckedChange = {
-                        if (it) selected.add(name) else selected.remove(name)
-                    })
-                    Column(Modifier.weight(1f)) {
-                        Text(name, fontSize = 13.sp, color = Ink, fontWeight = FontWeight.Medium)
-                        if (desc.isNotBlank()) Text(desc, fontSize = 11.sp, color = Ink3, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Row(Modifier.padding(horizontal = 14.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            Modifier.size(34.dp).background(if (on) Accent.copy(alpha = 0.18f) else Ink.copy(alpha = 0.06f), RoundedCornerShape(9.dp)),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(name.firstOrNull()?.uppercase() ?: "?", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = if (on) AccentInk else Ink3)
+                        }
+                        Spacer(Modifier.width(12.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(name, fontSize = 14.sp, fontWeight = FontWeight.Medium, color = Ink)
+                            Text("$count 个工具", fontSize = 11.sp, color = Ink3)
+                        }
+                        Box(
+                            Modifier.size(20.dp).background(if (on) Accent else Paper3, androidx.compose.foundation.shape.CircleShape),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            if (on) Text("✓", fontSize = 12.sp, color = Paper, fontWeight = FontWeight.Bold)
+                        }
                     }
                 }
             }
-            Spacer(Modifier.height(14.dp))
+            Spacer(Modifier.height(16.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 OutlinedButton(
                     onClick = { vm.setEnabledTools(emptyList()); onDismiss() },
@@ -972,7 +997,7 @@ private fun ToolPickerSheet(vm: ChatViewModel, onDismiss: () -> Unit) {
                 FilledTonalButton(
                     onClick = { vm.setEnabledTools(selected.toList()); onDismiss() },
                     modifier = Modifier.weight(1f)
-                ) { Text("应用（${selected.size} 个工具）", color = AccentInk) }
+                ) { Text("应用（${selected.size} 个来源）", color = AccentInk) }
             }
         }
     }

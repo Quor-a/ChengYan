@@ -166,6 +166,19 @@ object McpManager {
     /** UI 也需要同一套清洗规则。 */
     fun sanitizePublic(s: String) = sanitize(s)
 
+    /** 指定服务器的工具全名列表（含逐工具开关过滤；未启用返回空）。 */
+    fun toolNamesFor(ctx: Context, id: String): List<String> {
+        val c = loadAll(ctx).find { it.id == id } ?: return emptyList()
+        if (!c.enabled) return emptyList()
+        val arr = runCatching { JSONArray(c.toolsJson) }.getOrElse { return emptyList() }
+        val out = mutableListOf<String>()
+        for (i in 0 until arr.length()) {
+            val full = "mcp_" + sanitizePublic(c.name) + "_" + sanitizePublic(arr.getJSONObject(i).optString("name"))
+            if (full !in c.disabledTools) out.add(full)
+        }
+        return out
+    }
+
     /** 切换单个工具是否暴露给 AI。 */
     fun toggleTool(ctx: Context, connectorId: String, fullToolName: String, disabled: Boolean) {
         val c = loadAll(ctx).firstOrNull { it.id == connectorId } ?: return
