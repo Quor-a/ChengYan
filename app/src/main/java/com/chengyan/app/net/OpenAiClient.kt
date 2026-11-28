@@ -84,6 +84,7 @@ class OpenAiClient {
                 Tools.definitionsJson().forEach { add(it) }
                 PhoneTools.definitionsJson().forEach { add(it) }
                 McpManager.definitionsJson(context ?: return@buildJsonArray).forEach { add(it) }
+                ConnectorManager.definitionsJson(context ?: return@buildJsonArray).forEach { add(it) }
             })
             // 输出 token 上限（>0 时下发，本地/部分兼容端点可设为 0 关闭）
             if (config.maxTokens > 0) put("max_tokens", config.maxTokens)

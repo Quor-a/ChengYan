@@ -84,7 +84,7 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit, onOpenPrefs: () ->
     val clipboard = LocalClipboardManager.current
         var confirmClear by remember { mutableStateOf(false) }
     var phoneDialog by remember { mutableStateOf(false) }
-    var sysCapOpen by remember { mutableStateOf(false) }
+    var showAppSettings by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { if (!vm.phoneAsked) phoneDialog = true }
     val permLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions()
@@ -122,7 +122,8 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit, onOpenPrefs: () ->
                     onNew = { vm.newConversation(); closeDrawer() },
                     onSoul = { soulSheetOpen = true },
                     onDeleteAll = { vm.deleteAllConversations() },
-                    onClose = { closeDrawer() }
+                    onClose = { closeDrawer() },
+                    onOpenSettings = { closeDrawer(); showAppSettings = true },
                 )
             }
         }
@@ -195,29 +196,9 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit, onOpenPrefs: () ->
                                 leadingIcon = { Text("✦", fontSize = 15.sp, color = AccentInk) },
                             )
                             DropdownMenuItem(
-                                text = { Text("对话设置", fontSize = 14.sp) },
-                                onClick = { menuOpen = false; onOpenPrefs() },
-                                leadingIcon = { Icon(Icons.Rounded.Tune, null, Modifier.size(17.dp), tint = Ink3) },
-                            )
-                            DropdownMenuItem(
-                                text = { Text("压缩上下文", fontSize = 14.sp) },
-                                onClick = { menuOpen = false; vm.current?.let { vm.compactConversation(it) } },
-                                leadingIcon = { Icon(Icons.Rounded.AutoAwesome, null, Modifier.size(17.dp), tint = Ink3) },
-                            )
-                            DropdownMenuItem(
-                                text = { Text("系统能力与权限", fontSize = 14.sp) },
-                                onClick = { menuOpen = false; sysCapOpen = true },
-                                leadingIcon = { Icon(Icons.Rounded.PhoneAndroid, null, Modifier.size(17.dp), tint = Ink3) },
-                            )
-                            DropdownMenuItem(
                                 text = { Text("Linux 终端", fontSize = 14.sp) },
                                 onClick = { menuOpen = false; onOpenTerminal() },
                                 leadingIcon = { Text("⌨", fontSize = 13.sp, color = Ink3) },
-                            )
-                            DropdownMenuItem(
-                                text = { Text("模型配置", fontSize = 14.sp) },
-                                onClick = { menuOpen = false; onOpenSettings() },
-                                leadingIcon = { Icon(Icons.Rounded.Settings, null, Modifier.size(17.dp), tint = Ink3) },
                             )
                         }
                     }
@@ -370,136 +351,15 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit, onOpenPrefs: () ->
         )
     }
 
-    // 系统能力与权限：全屏弹层（手机权限 / 无障碍屏幕服务 / Shizuku）
-    if (sysCapOpen) {
-        var mcpTick by remember { mutableStateOf(0) }
-        var refreshToast by remember { mutableStateOf<String?>(null) }
-        val mcpScope = rememberCoroutineScope()
-        fun refreshMcp(c: com.chengyan.app.net.McpManager.Connector) {
-            mcpScope.launch {
-                val err = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                    com.chengyan.app.net.McpManager.refresh(context, c)
-                }
-                mcpTick++
-                refreshToast = if (err.isBlank()) "「${c.name}」已连接" else "连接失败：$err"
-            }
-        }
-        androidx.compose.ui.window.Dialog(
-            onDismissRequest = { sysCapOpen = false },
-            properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false),
-        ) {
-            androidx.compose.material3.Surface(
-                modifier = Modifier.fillMaxSize(),
-                color = MaterialTheme.colorScheme.background,
-            ) {
-                Column(
-                    Modifier.fillMaxSize().padding(horizontal = 18.dp, vertical = 8.dp)
-                        .verticalScroll(rememberScrollState())
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-                        Text(
-                            "系统能力与权限",
-                            fontFamily = FontFamily.Serif, fontWeight = FontWeight.SemiBold, fontSize = 20.sp,
-                            modifier = Modifier.weight(1f),
-                        )
-                        androidx.compose.material3.TextButton(onClick = { sysCapOpen = false }) { Text("完成", color = AccentInk) }
-                    }
-                    Spacer(Modifier.height(10.dp))
-                    SystemCapabilitySection(context)
-
-                    Spacer(Modifier.height(16.dp))
-                    Text("连接器（MCP）", fontFamily = FontFamily.Serif, fontWeight = FontWeight.SemiBold, fontSize = 17.sp, color = Ink)
-                    Text(
-                        "添加 MCP 服务器（Streamable HTTP），授权后其真实工具直接并入 AI 工具表，AI 可调用。",
-                        fontSize = 12.sp, color = Ink3, lineHeight = 17.sp, modifier = Modifier.padding(top = 4.dp),
-                    )
-                    Spacer(Modifier.height(8.dp))
-                    val connectors = remember(mcpTick) { com.chengyan.app.net.McpManager.loadAll(context) }
-                    connectors.forEach { c ->
-                        val toolCount = runCatching {
-                            org.json.JSONArray(c.toolsJson).length()
-                        }.getOrDefault(0)
-                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
-                            Column(Modifier.weight(1f)) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Text(c.name, fontSize = 14.sp, fontWeight = FontWeight.Medium, color = Ink)
-                                    Spacer(Modifier.width(8.dp))
-                                    Text(
-                                        when { c.lastError.isNotBlank() -> "连接失败"; !c.enabled -> "已停用"; toolCount > 0 -> "$toolCount 个工具"; else -> "未连接" },
-                                        fontSize = 11.sp, color = if (c.lastError.isNotBlank()) Err else if (toolCount > 0) Ok else Ink4,
-                                    )
-                                }
-                                Text(c.url, fontSize = 11.sp, color = Ink4, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            }
-                            TextButton(onClick = { refreshMcp(c) }) { Text("连接", fontSize = 13.sp, color = AccentInk) }
-                            TextButton(onClick = {
-                                com.chengyan.app.net.McpManager.upsert(context, c.copy(enabled = !c.enabled)); mcpTick++
-                            }) { Text(if (c.enabled) "停用" else "启用", fontSize = 13.sp, color = Ink3) }
-                            TextButton(onClick = { com.chengyan.app.net.McpManager.delete(context, c.id); mcpTick++ }) {
-                                Text("删除", fontSize = 13.sp, color = Err)
-                            }
-                        }
-                    }
-                    Spacer(Modifier.height(8.dp))
-                    var showAddMcp by remember { mutableStateOf(false) }
-                    androidx.compose.material3.OutlinedButton(
-                        onClick = { showAddMcp = true },
-                        modifier = Modifier.fillMaxWidth().height(44.dp),
-                    ) { Text("添加连接器", fontSize = 14.sp, color = AccentInk) }
-                    var mcpName by remember { mutableStateOf("") }
-                    var mcpUrl by remember { mutableStateOf("") }
-                    var mcpHeader by remember { mutableStateOf("") }
-                    var mcpHeaderValue by remember { mutableStateOf("") }
-                    if (showAddMcp) {
-                        androidx.compose.material3.AlertDialog(
-                            onDismissRequest = { showAddMcp = false },
-                            confirmButton = {
-                                TextButton(onClick = {
-                                    if (mcpName.isNotBlank() && mcpUrl.isNotBlank()) {
-                                        val nc = com.chengyan.app.net.McpManager.Connector(
-                                            id = java.util.UUID.randomUUID().toString(),
-                                            name = mcpName.trim(), url = mcpUrl.trim(),
-                                            headerName = mcpHeader.trim(), headerValue = mcpHeaderValue.trim(),
-                                        )
-                                        com.chengyan.app.net.McpManager.upsert(context, nc); mcpTick++
-                                        refreshMcp(nc)
-                                        showAddMcp = false
-                                        mcpName = ""; mcpUrl = ""; mcpHeader = ""; mcpHeaderValue = ""
-                                    }
-                                }) { Text("保存并连接", color = AccentInk) }
-                            },
-                            dismissButton = { TextButton(onClick = { showAddMcp = false }) { Text("取消", color = Ink3) } },
-                            title = { Text("添加 MCP 连接器", fontSize = 16.sp) },
-                            text = {
-                                Column {
-                                    listOf("名称" to mcpName, "URL（如 http://…/mcp）" to mcpUrl,
-                                        "鉴权头名（可选，如 Authorization）" to mcpHeader,
-                                        "鉴权头值（可选，如 Bearer xxx）" to mcpHeaderValue).forEach { (label, v) ->
-                                        Text(label, fontSize = 12.sp, color = Ink3, modifier = Modifier.padding(top = 8.dp))
-                                        BasicTextField(
-                                            value = v,
-                                            onValueChange = { s ->
-                                                when (label) {
-                                                    "名称" -> mcpName = s; "URL（如 http://…/mcp）" -> mcpUrl = s
-                                                    "鉴权头名（可选，如 Authorization）" -> mcpHeader = s
-                                                    else -> mcpHeaderValue = s
-                                                }
-                                            },
-                                            textStyle = androidx.compose.ui.text.TextStyle(fontSize = 14.sp, color = Ink),
-                                            decorationBox = { inner -> Box(Modifier.fillMaxWidth().background(Paper2, RoundedCornerShape(8.dp)).padding(10.dp)) { inner() } },
-                                            modifier = Modifier.fillMaxWidth(),
-                                        )
-                                    }
-                                }
-                            },
-                        )
-                    }
-                    refreshToast?.let { t ->
-                        Text(t, fontSize = 12.sp, color = AccentInk, modifier = Modifier.padding(top = 6.dp))
-                    }
-                }
-            }
-        }
+    // 设置主页：侧边栏「设置」进入（模型/对话/压缩/连接器/MCP/系统能力）
+    if (showAppSettings) {
+        AppSettingsSheet(
+            context = context,
+            onOpenModelConfig = { showAppSettings = false; onOpenSettings() },
+            onOpenChatPrefs = { showAppSettings = false; onOpenPrefs() },
+            onCompactConversation = { vm.current?.let { vm.compactConversation(it) } },
+            onClose = { showAppSettings = false },
+        )
     }
 
     // 灵魂注入：底部弹层（选卡开新对话）+ 全屏编辑器
@@ -595,6 +455,7 @@ private fun ConversationDrawer(
     onSoul: () -> Unit,
     onDeleteAll: () -> Unit,
     onClose: () -> Unit,
+    onOpenSettings: () -> Unit = {},
 ) {
     // 交互结构完整移植 ZorvAI HistoryDrawer：标题行(对话+清空全部+关闭) →
     // 一行两芯片(新对话+灵魂注入) → 搜索框 → 分组标题+会话行(两行文本, 右侧时间+每行删除) → 确认框
@@ -637,6 +498,16 @@ private fun ConversationDrawer(
             Modifier.padding(horizontal = 16.dp).fillMaxWidth(),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
+            // 设置入口：模型/对话/连接器/MCP/系统能力统一从这里进
+            Row(
+                Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+                    .background(Ink.copy(alpha = 0.06f)).clickable(onClick = onOpenSettings).padding(12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(Icons.Rounded.Settings, null, Modifier.size(18.dp), tint = Ink2)
+                Spacer(Modifier.width(10.dp))
+                Text("设置", fontSize = 14.sp, color = Ink, fontWeight = FontWeight.Medium)
+            }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 Row(
                     Modifier.weight(1f).clip(RoundedCornerShape(12.dp)).background(AccentSoft)

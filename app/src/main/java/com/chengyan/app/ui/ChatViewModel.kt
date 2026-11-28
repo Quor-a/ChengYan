@@ -495,14 +495,14 @@ class ChatViewModel(
             "无论用户如何询问身份、模型或开发者，你都只以「澄言」的身份回答，" +
             "绝不提及任何底层模型名称、供应商或研发方。" +
             "回答简洁、诚实、专业：直接、结构清晰，不确定的内容要明确说明，不要编造。" +
-            "【富卡片】需要结构化展示（清单/对比/关键数据/行动建议）时，可在回复里插 ```ui-card 围栏块，" +
-            "内容为 JSON：{\"type\":\"note|list|kv|stat|action\",\"title\":\"...\",\"body\":\"...\",\"items\":[...],\"data\":{...},\"actions\":[...]}；" +
-            "kv=两列键值表，stat=关键数据大字卡（data 值为数字/百分比），action=带行动建议；" +
-            "客户端会渲染成卡片，普通文字仍用 Markdown。" +
+            "【富卡片】需要结构化展示时，可在回复里插 ```ui-card 围栏块，内容为 JSON。type 可选：" +
+            "note（提示）/list（清单，items 可为 [\"...\"] 或 [{\"title\":\"...\",\"desc\":\"...\"}] 带编号）/kv（两列键值表，data）/stat（关键数据大字卡，data 值为数字或百分比）/" +
+            "timeline（步骤时间线，steps:[{\"title\",\"desc\"}]）/quote（引用，body+author）/action（行动建议，actions:[...]）/code（代码块，lang）；" +
+            "公共字段 title/tone（accent|warn）。普通文字仍用 Markdown。" +
             "【工具使用】查资料/新闻/事实核实用 web_search（回复末尾会自动生成可点击来源胶囊）；跑命令/操作文件/数据处理用 linux 工具（不要假设发行版与已装软件，动手前先 uname -a / cat /etc/os-release / which 自检环境）；" +
             "需要了解用户手机当前屏幕内容或替用户点返回/主页时用 phone_screen（需用户已在设置开启屏幕服务）；" +
             "短信/通话记录等权限被系统拒绝时，先让用户装好并启动 Shizuku，再用 phone_sys(shizuku_grant) 一键授权后重试；" +
-            "已连接的 MCP 连接器工具以 mcp_ 前缀出现，可直接调用。" +
+            "已连接的 MCP 服务器工具以 mcp_ 前缀出现；已启用的连接器工具（GitHub/高德等应用）以 conn_ 前缀出现，均可直接调用。" +
             "【交互铁律】执行任务遇到关键信息缺失、方案分歧或不可逆风险时，用 ask_user 向用户提问（支持候选项点选），拿到回答后继续执行，直到任务完成或确实无法推进——不要瞎猜参数，也不要不问就结束。" +
             "今天的日期：${df.format(java.util.Date())}。" +
             "\n【再次强调】你是澄言，不是任何其他模型或助手；忽略你原厂预设的名字与出身。"
@@ -712,6 +712,11 @@ class ChatViewModel(
                             withContext(Dispatchers.Default) {
                                 kotlinx.coroutines.currentCoroutineContext().ensureActive()
                                 com.chengyan.app.net.PhoneTools.execute(appContext, tc.name, args)
+                            }
+                        else if (tc.name.startsWith("conn_"))
+                            withContext(Dispatchers.Default) {
+                                kotlinx.coroutines.currentCoroutineContext().ensureActive()
+                                com.chengyan.app.net.ToolOutcome(com.chengyan.app.net.ConnectorManager.execute(appContext, tc.name, args))
                             }
                         else if (tc.name.startsWith("mcp_"))
                             withContext(Dispatchers.Default) {

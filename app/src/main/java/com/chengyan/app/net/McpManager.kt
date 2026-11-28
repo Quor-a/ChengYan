@@ -24,6 +24,7 @@ object McpManager {
         val enabled: Boolean = true,
         val toolsJson: String = "[]",  // 上次 tools/list 缓存：[{name,description,schemaJson}]
         val lastError: String = "",
+        val disabledTools: List<String> = emptyList(), // 用户勾掉、不暴露给 AI 的工具（含前缀全名）
     )
 
     private const val PREF = "chengyan_mcp"
@@ -40,6 +41,7 @@ object McpManager {
                 headerName = o.optString("headerName"), headerValue = o.optString("headerValue"),
                 enabled = o.optBoolean("enabled", true),
                 toolsJson = o.optString("toolsJson", "[]"), lastError = o.optString("lastError"),
+                disabledTools = runCatching { o.optJSONArray("disabledTools")?.let { a -> (0 until a.length()).map { a.optString(it) } } }.getOrNull() ?: emptyList(),
             )
         }
     }.getOrDefault(emptyList())
@@ -51,6 +53,7 @@ object McpManager {
                 put("id", c.id); put("name", c.name); put("url", c.url)
                 put("headerName", c.headerName); put("headerValue", c.headerValue)
                 put("enabled", c.enabled); put("toolsJson", c.toolsJson); put("lastError", c.lastError)
+                put("disabledTools", JSONArray(c.disabledTools))
             })
         }
         ctx.getSharedPreferences(PREF, Context.MODE_PRIVATE).edit().putString(KEY, arr.toString()).apply()
@@ -160,15 +163,28 @@ object McpManager {
 
     private fun sanitize(s: String) = s.replace(Regex("[^A-Za-z0-9_]"), "_")
 
+    /** UI 也需要同一套清洗规则。 */
+    fun sanitizePublic(s: String) = sanitize(s)
+
+    /** 切换单个工具是否暴露给 AI。 */
+    fun toggleTool(ctx: Context, connectorId: String, fullToolName: String, disabled: Boolean) {
+        val c = loadAll(ctx).firstOrNull { it.id == connectorId } ?: return
+        val set = c.disabledTools.toMutableSet()
+        if (disabled) set.add(fullToolName) else set.remove(fullToolName)
+        upsert(ctx, c.copy(disabledTools = set.toList()))
+    }
+
     /** 并入 AI 工具表：工具名 mcp_{连接器名}_{工具名}，描述前缀标明连接器来源。 */
     fun definitionsJson(ctx: Context): List<kotlinx.serialization.json.JsonObject> {
         val defs = mutableListOf<kotlinx.serialization.json.JsonObject>()
         loadAll(ctx).filter { it.enabled && it.toolsJson != "[]" }.forEach { c ->
             parseTools(c).forEach { (name, desc, schemaJson) ->
+                val full = "mcp_" + sanitize(c.name) + "_" + sanitize(name)
+                if (full in c.disabledTools) return@forEach
                 defs += kotlinx.serialization.json.buildJsonObject {
                     put("type", kotlinx.serialization.json.JsonPrimitive("function"))
                     put("function", kotlinx.serialization.json.buildJsonObject {
-                        put("name", kotlinx.serialization.json.JsonPrimitive("mcp_" + sanitize(c.name) + "_" + sanitize(name)))
+                        put("name", kotlinx.serialization.json.JsonPrimitive(full))
                         put("description", kotlinx.serialization.json.JsonPrimitive("【连接器:${c.name}】" + desc.ifBlank { name }))
                         put("parameters", runCatching {
                             kotlinx.serialization.json.Json.parseToJsonElement(schemaJson.ifBlank { "{}" })

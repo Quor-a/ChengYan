@@ -607,10 +607,26 @@ private fun UiCardView(card: com.chengyan.app.data.UiCardParser.Card) {
                     }
                 }
                 com.chengyan.app.data.UiCardParser.Kind.LIST -> {
-                    card.items.forEach { item ->
-                        Row(Modifier.padding(vertical = 2.dp)) {
-                            Text("· ", fontSize = 13.sp, color = accent)
-                            Text(item, fontSize = 13.sp, color = Ink, modifier = Modifier.weight(1f))
+                    if (card.itemsDetailed.isNotEmpty()) {
+                        card.itemsDetailed.forEachIndexed { i, item ->
+                            Row(Modifier.padding(vertical = 3.dp)) {
+                                Box(
+                                    Modifier.size(20.dp).background(accent.copy(alpha = 0.12f), RoundedCornerShape(10.dp)),
+                                    contentAlignment = Alignment.Center,
+                                ) { Text("${i + 1}", fontSize = 11.sp, color = accent, fontWeight = FontWeight.SemiBold) }
+                                Spacer(Modifier.width(8.dp))
+                                Column(Modifier.weight(1f)) {
+                                    Text(item.title, fontSize = 13.sp, color = Ink, fontWeight = FontWeight.Medium)
+                                    if (item.desc.isNotBlank()) Text(item.desc, fontSize = 12.sp, color = Ink3, lineHeight = 17.sp)
+                                }
+                            }
+                        }
+                    } else {
+                        card.items.forEach { item ->
+                            Row(Modifier.padding(vertical = 2.dp)) {
+                                Text("· ", fontSize = 13.sp, color = accent)
+                                Text(item, fontSize = 13.sp, color = Ink, modifier = Modifier.weight(1f))
+                            }
                         }
                     }
                 }
@@ -619,6 +635,38 @@ private fun UiCardView(card: com.chengyan.app.data.UiCardParser.Card) {
                         Row(Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
                             Text(k, fontSize = 12.sp, color = Ink2, modifier = Modifier.weight(1f))
                             Text(v, fontSize = 12.sp, color = Ink, fontWeight = FontWeight.Medium)
+                        }
+                    }
+                }
+                com.chengyan.app.data.UiCardParser.Kind.QUOTE -> {
+                    // 引用卡：左侧强调竖条 + 大引号
+                    Row {
+                        Box(Modifier.width(3.dp).height(IntrinsicSize.Min).background(accent, RoundedCornerShape(2.dp)))
+                        Spacer(Modifier.width(10.dp))
+                        Column {
+                            Text("“${card.body}”", fontSize = 14.sp, color = Ink, lineHeight = 22.sp, fontStyle = androidx.compose.ui.text.font.FontStyle.Italic)
+                            if (card.author.isNotBlank()) {
+                                Spacer(Modifier.height(4.dp))
+                                Text("—— ${card.author}", fontSize = 12.sp, color = Ink3)
+                            }
+                        }
+                    }
+                }
+                com.chengyan.app.data.UiCardParser.Kind.TIMELINE -> {
+                    // 时间线：左侧圆点竖线，右侧标题+描述
+                    card.itemsDetailed.forEachIndexed { i, item ->
+                        Row {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Box(Modifier.size(10.dp).background(accent, CircleShape))
+                                if (i < card.itemsDetailed.lastIndex) {
+                                    Box(Modifier.width(2.dp).height(28.dp).background(Line2))
+                                }
+                            }
+                            Spacer(Modifier.width(10.dp))
+                            Column(Modifier.padding(bottom = 6.dp)) {
+                                Text(item.title, fontSize = 13.sp, color = Ink, fontWeight = FontWeight.Medium)
+                                if (item.desc.isNotBlank()) Text(item.desc, fontSize = 12.sp, color = Ink3, lineHeight = 17.sp)
+                            }
                         }
                     }
                 }
