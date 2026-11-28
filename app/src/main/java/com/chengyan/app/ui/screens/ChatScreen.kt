@@ -327,8 +327,63 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit, onOpenPrefs: () ->
         )
     }
 
+    // ask_user：AI 提问弹窗（回答作为工具结果回传，任务继续）
+    val askReq by com.chengyan.app.data.AskUserBridge.pending.collectAsState()
+    askReq?.let { req ->
+        var askText by remember(req.id) { mutableStateOf("") }
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { com.chengyan.app.data.AskUserBridge.skip() },
+            confirmButton = {
+                TextButton(onClick = {
+                    com.chengyan.app.data.AskUserBridge.submit(askText.trim().ifBlank { "（用户未填写）" })
+                }) { Text("回答", color = AccentInk) }
+            },
+            dismissButton = { TextButton(onClick = { com.chengyan.app.data.AskUserBridge.skip() }) { Text("跳过", color = Ink3) } },
+            title = { Text("AI 想问你", fontSize = 16.sp, fontWeight = FontWeight.SemiBold) },
+            text = {
+                Column {
+                    Text(req.question, fontSize = 14.sp, color = Ink, lineHeight = 21.sp)
+                    if (req.choices.isNotEmpty()) {
+                        Spacer(Modifier.height(10.dp))
+                        req.choices.forEach { c ->
+                            androidx.compose.material3.OutlinedButton(
+                                onClick = { com.chengyan.app.data.AskUserBridge.submit(c) },
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+                            ) { Text(c, fontSize = 13.sp, color = AccentInk) }
+                        }
+                    }
+                    Spacer(Modifier.height(10.dp))
+                    BasicTextField(
+                        value = askText,
+                        onValueChange = { askText = it },
+                        textStyle = androidx.compose.ui.text.TextStyle(fontSize = 14.sp, color = Ink),
+                        decorationBox = { inner ->
+                            Box(Modifier.fillMaxWidth().background(Paper2, RoundedCornerShape(8.dp)).padding(10.dp)) {
+                                if (askText.isBlank()) Text("输入你的回答…", fontSize = 13.sp, color = Ink4)
+                                inner()
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            },
+        )
+    }
+
     // 系统能力与权限：全屏弹层（手机权限 / 无障碍屏幕服务 / Shizuku）
     if (sysCapOpen) {
+        var mcpTick by remember { mutableStateOf(0) }
+        var refreshToast by remember { mutableStateOf<String?>(null) }
+        val mcpScope = rememberCoroutineScope()
+        fun refreshMcp(c: com.chengyan.app.net.McpManager.Connector) {
+            mcpScope.launch {
+                val err = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    com.chengyan.app.net.McpManager.refresh(context, c)
+                }
+                mcpTick++
+                refreshToast = if (err.isBlank()) "「${c.name}」已连接" else "连接失败：$err"
+            }
+        }
         androidx.compose.ui.window.Dialog(
             onDismissRequest = { sysCapOpen = false },
             properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false),
@@ -351,6 +406,97 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit, onOpenPrefs: () ->
                     }
                     Spacer(Modifier.height(10.dp))
                     SystemCapabilitySection(context)
+
+                    Spacer(Modifier.height(16.dp))
+                    Text("连接器（MCP）", fontFamily = FontFamily.Serif, fontWeight = FontWeight.SemiBold, fontSize = 17.sp, color = Ink)
+                    Text(
+                        "添加 MCP 服务器（Streamable HTTP），授权后其真实工具直接并入 AI 工具表，AI 可调用。",
+                        fontSize = 12.sp, color = Ink3, lineHeight = 17.sp, modifier = Modifier.padding(top = 4.dp),
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    val connectors = remember(mcpTick) { com.chengyan.app.net.McpManager.loadAll(context) }
+                    connectors.forEach { c ->
+                        val toolCount = runCatching {
+                            org.json.JSONArray(c.toolsJson).length()
+                        }.getOrDefault(0)
+                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+                            Column(Modifier.weight(1f)) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(c.name, fontSize = 14.sp, fontWeight = FontWeight.Medium, color = Ink)
+                                    Spacer(Modifier.width(8.dp))
+                                    Text(
+                                        when { c.lastError.isNotBlank() -> "连接失败"; !c.enabled -> "已停用"; toolCount > 0 -> "$toolCount 个工具"; else -> "未连接" },
+                                        fontSize = 11.sp, color = if (c.lastError.isNotBlank()) Err else if (toolCount > 0) Ok else Ink4,
+                                    )
+                                }
+                                Text(c.url, fontSize = 11.sp, color = Ink4, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+                            TextButton(onClick = { refreshMcp(c) }) { Text("连接", fontSize = 13.sp, color = AccentInk) }
+                            TextButton(onClick = {
+                                com.chengyan.app.net.McpManager.upsert(context, c.copy(enabled = !c.enabled)); mcpTick++
+                            }) { Text(if (c.enabled) "停用" else "启用", fontSize = 13.sp, color = Ink3) }
+                            TextButton(onClick = { com.chengyan.app.net.McpManager.delete(context, c.id); mcpTick++ }) {
+                                Text("删除", fontSize = 13.sp, color = Err)
+                            }
+                        }
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    var showAddMcp by remember { mutableStateOf(false) }
+                    androidx.compose.material3.OutlinedButton(
+                        onClick = { showAddMcp = true },
+                        modifier = Modifier.fillMaxWidth().height(44.dp),
+                    ) { Text("添加连接器", fontSize = 14.sp, color = AccentInk) }
+                    var mcpName by remember { mutableStateOf("") }
+                    var mcpUrl by remember { mutableStateOf("") }
+                    var mcpHeader by remember { mutableStateOf("") }
+                    var mcpHeaderValue by remember { mutableStateOf("") }
+                    if (showAddMcp) {
+                        androidx.compose.material3.AlertDialog(
+                            onDismissRequest = { showAddMcp = false },
+                            confirmButton = {
+                                TextButton(onClick = {
+                                    if (mcpName.isNotBlank() && mcpUrl.isNotBlank()) {
+                                        val nc = com.chengyan.app.net.McpManager.Connector(
+                                            id = java.util.UUID.randomUUID().toString(),
+                                            name = mcpName.trim(), url = mcpUrl.trim(),
+                                            headerName = mcpHeader.trim(), headerValue = mcpHeaderValue.trim(),
+                                        )
+                                        com.chengyan.app.net.McpManager.upsert(context, nc); mcpTick++
+                                        refreshMcp(nc)
+                                        showAddMcp = false
+                                        mcpName = ""; mcpUrl = ""; mcpHeader = ""; mcpHeaderValue = ""
+                                    }
+                                }) { Text("保存并连接", color = AccentInk) }
+                            },
+                            dismissButton = { TextButton(onClick = { showAddMcp = false }) { Text("取消", color = Ink3) } },
+                            title = { Text("添加 MCP 连接器", fontSize = 16.sp) },
+                            text = {
+                                Column {
+                                    listOf("名称" to mcpName, "URL（如 http://…/mcp）" to mcpUrl,
+                                        "鉴权头名（可选，如 Authorization）" to mcpHeader,
+                                        "鉴权头值（可选，如 Bearer xxx）" to mcpHeaderValue).forEach { (label, v) ->
+                                        Text(label, fontSize = 12.sp, color = Ink3, modifier = Modifier.padding(top = 8.dp))
+                                        BasicTextField(
+                                            value = v,
+                                            onValueChange = { s ->
+                                                when (label) {
+                                                    "名称" -> mcpName = s; "URL（如 http://…/mcp）" -> mcpUrl = s
+                                                    "鉴权头名（可选，如 Authorization）" -> mcpHeader = s
+                                                    else -> mcpHeaderValue = s
+                                                }
+                                            },
+                                            textStyle = androidx.compose.ui.text.TextStyle(fontSize = 14.sp, color = Ink),
+                                            decorationBox = { inner -> Box(Modifier.fillMaxWidth().background(Paper2, RoundedCornerShape(8.dp)).padding(10.dp)) { inner() } },
+                                            modifier = Modifier.fillMaxWidth(),
+                                        )
+                                    }
+                                }
+                            },
+                        )
+                    }
+                    refreshToast?.let { t ->
+                        Text(t, fontSize = 12.sp, color = AccentInk, modifier = Modifier.padding(top = 6.dp))
+                    }
                 }
             }
         }

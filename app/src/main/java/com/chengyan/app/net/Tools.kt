@@ -76,6 +76,21 @@ object Tools {
         add(buildJsonObject {
             put("type", "function")
             put("function", buildJsonObject {
+                put("name", "ask_user")
+                put("description", "向用户提问并等待回答（用户会在对话框看到问题并作答，答案作为结果回传给你，任务继续）。执行任务遇到关键信息缺失、多种方案需要用户拍板、或操作有不可逆风险需要确认时使用——不要瞎猜参数，也不要不问就结束任务。")
+                put("parameters", buildJsonObject {
+                    put("type", "object")
+                    put("properties", buildJsonObject {
+                        put("question", buildJsonObject { put("type", "string"); put("description", "要问用户的问题（具体、可回答）") })
+                        put("choices", buildJsonObject { put("type", "array"); put("items", buildJsonObject { put("type", "string") }); put("description", "可选：候选项（用户可点选），如 [\"方案A\",\"方案B\"]") })
+                    })
+                    put("required", buildJsonArray { add(kotlinx.serialization.json.JsonPrimitive("question")) })
+                })
+            })
+        })
+        add(buildJsonObject {
+            put("type", "function")
+            put("function", buildJsonObject {
                 put("name", "linux")
                 put("description", "操控手机上的 Linux 运行环境（proot 用户态隔离，无 root）。" +
                     "不要假设发行版、libc 或已装软件：动手前先自检环境——`uname -a`、`cat /etc/os-release`、`which bash python3 wget`，再按实际结果选 shell 语法与包管理器。" +
@@ -123,6 +138,18 @@ object Tools {
                 str("query") ?: throw IllegalArgumentException("缺少 query"),
                 (num("count").takeIf { it > 0 } ?: 6.0).toInt()
             )
+            "ask_user" -> {
+                val el = runCatching {
+                    kotlinx.serialization.json.Json.parseToJsonElement(argumentsJson.ifBlank { "{}" })
+                }.getOrNull() as? kotlinx.serialization.json.JsonObject
+                val choices = (el?.get("choices") as? kotlinx.serialization.json.JsonArray)
+                    ?.mapNotNull { (it as? kotlinx.serialization.json.JsonPrimitive)?.content }
+                    ?: emptyList()
+                com.chengyan.app.data.AskUserBridge.ask(
+                    str("question") ?: throw IllegalArgumentException("缺少 question"),
+                    choices,
+                )
+            }
             else -> "未知工具：$name"
         }
     }.getOrElse { "工具执行出错：${it.message}" }

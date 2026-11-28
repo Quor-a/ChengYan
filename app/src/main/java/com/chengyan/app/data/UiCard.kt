@@ -17,7 +17,7 @@ object UiCardParser {
     private val BLOCK = Regex("```$FENCE\\s*\\n([\\s\\S]*?)```")
 
     /** 卡片类型。 */
-    enum class Kind { NOTE, LIST, KV, ACTION, CODE, UNKNOWN }
+    enum class Kind { NOTE, LIST, KV, ACTION, CODE, STAT, UNKNOWN }
 
     data class Card(
         val kind: Kind,
@@ -58,6 +58,7 @@ object UiCardParser {
             "note" -> Card(Kind.NOTE, s("title"), s("body"), tone = s("tone"), raw = json)
             "list" -> Card(Kind.LIST, s("title"), items = strList("items"), tone = s("tone"), raw = json)
             "kv", "table" -> Card(Kind.KV, s("title"), kv = kvMap("data"), tone = s("tone"), raw = json)
+            "stat" -> Card(Kind.STAT, s("title"), kv = kvMap("data"), tone = s("tone"), raw = json)
             "action" -> Card(Kind.ACTION, s("title"), s("body"), actions = strList("actions"), tone = s("tone"), raw = json)
             "code" -> Card(Kind.CODE, s("title"), s("body"), tone = s("lang"), raw = json)
             else -> Card(Kind.UNKNOWN, s("title"), s("body"), raw = json)

@@ -26,6 +26,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -237,6 +238,38 @@ fun MessageBubble(
                             parsed.second.forEach { card ->
                                 UiCardView(card)
                                 Spacer(Modifier.height(6.dp))
+                            }
+                        }
+                        // 搜索来源胶囊（对标 zorv AI 引用溯源）：web_search 结果里的标题+链接，可点开
+                        val sources = remember(message.toolCalls) {
+                            message.toolCalls.filter { it.name == "web_search" }.flatMap { tc ->
+                                Regex("(\\d+)\\. (.+)\\n\\s+(https?://\\S+)").findAll(tc.result).map { m ->
+                                    Triple(m.groupValues[2].trim(), m.groupValues[3].trim(), m.groupValues[1])
+                                }.toList()
+                            }.distinctBy { it.second }.take(6)
+                        }
+                        if (sources.isNotEmpty()) {
+                            Spacer(Modifier.height(8.dp))
+                            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())) {
+                                val ctx = androidx.compose.ui.platform.LocalContext.current
+                                sources.forEach { (title, url, idx) ->
+                                    androidx.compose.material3.Surface(
+                                        shape = RoundedCornerShape(14.dp),
+                                        color = androidx.compose.ui.graphics.Color(0xFFF3EDE2),
+                                        border = androidx.compose.foundation.BorderStroke(1.dp, Line2),
+                                        modifier = Modifier.padding(end = 6.dp).clickable {
+                                            runCatching {
+                                                ctx.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(url)))
+                                            }
+                                        },
+                                    ) {
+                                        Row(Modifier.padding(horizontal = 9.dp, vertical = 5.dp), verticalAlignment = Alignment.CenterVertically) {
+                                            Text("[$idx]", fontSize = 10.sp, color = AccentInk)
+                                            Spacer(Modifier.width(4.dp))
+                                            Text(title.take(24), fontSize = 11.sp, color = Ink2, maxLines = 1)
+                                        }
+                                    }
+                                }
                             }
                         }
                         if (message.streaming) StreamingCursor()
@@ -586,6 +619,17 @@ private fun UiCardView(card: com.chengyan.app.data.UiCardParser.Card) {
                         Row(Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
                             Text(k, fontSize = 12.sp, color = Ink2, modifier = Modifier.weight(1f))
                             Text(v, fontSize = 12.sp, color = Ink, fontWeight = FontWeight.Medium)
+                        }
+                    }
+                }
+                com.chengyan.app.data.UiCardParser.Kind.STAT -> {
+                    // 关键数据大字卡：label 小字灰 + value 大字强调色
+                    card.kv.forEach { (k, v) ->
+                        Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.Bottom) {
+                            Column(Modifier.weight(1f)) {
+                                Text(k, fontSize = 11.sp, color = Ink3)
+                                Text(v, fontSize = 22.sp, fontWeight = FontWeight.SemiBold, color = accent)
+                            }
                         }
                     }
                 }

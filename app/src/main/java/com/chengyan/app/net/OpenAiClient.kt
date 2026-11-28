@@ -65,6 +65,7 @@ class OpenAiClient {
     fun stream(
         config: ModelConfig,
         history: List<ChatTurn>,
+        context: android.content.Context? = null,
     ): Flow<StreamEvent> = callbackFlow {
         // 🔴 丢字修复见下方 onEvent：trySend 改 trySendBlocking（默认 channel 容量 64，
         //    消费慢时 trySend 静默失败 → 长回复掉 token）
@@ -82,6 +83,7 @@ class OpenAiClient {
             if (config.enableTools) put("tools", kotlinx.serialization.json.buildJsonArray {
                 Tools.definitionsJson().forEach { add(it) }
                 PhoneTools.definitionsJson().forEach { add(it) }
+                McpManager.definitionsJson(context ?: return@buildJsonArray).forEach { add(it) }
             })
             // 输出 token 上限（>0 时下发，本地/部分兼容端点可设为 0 关闭）
             if (config.maxTokens > 0) put("max_tokens", config.maxTokens)
