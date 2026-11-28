@@ -943,7 +943,7 @@ private fun ToolPickerSheet(vm: ChatViewModel, onDismiss: () -> Unit) {
         Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp).padding(bottom = 24.dp)) {
             Text("能力来源", fontSize = 18.sp, fontWeight = FontWeight.SemiBold, color = Ink)
             Text(
-                "点选本次对话让 AI 用哪些 MCP 服务器 / 连接器，点「确定」生效：不选=全部可用；选中后 AI 只用所选来源的工具。",
+                "点选本次对话让 AI 用哪些 MCP 服务器 / 连接器，选中即时生效：不选=全部可用；选中后 AI 只用所选来源的工具。",
                 fontSize = 12.sp, color = Ink3, lineHeight = 16.sp, modifier = Modifier.padding(top = 4.dp)
             )
             Spacer(Modifier.height(12.dp))
@@ -960,8 +960,8 @@ private fun ToolPickerSheet(vm: ChatViewModel, onDismiss: () -> Unit) {
                     color = if (on) AccentSoft else Paper2,
                     border = androidx.compose.foundation.BorderStroke(if (on) 1.5.dp else 1.dp, if (on) Accent else Line),
                     modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp).clickable {
-                        if (on) selected.remove(id)
-                        else if (ready) selected.add(id)
+                        if (on) { selected.remove(id); vm.setEnabledTools(selected.toList()) }
+                        else if (ready) { selected.add(id); vm.setEnabledTools(selected.toList()) }
                         else vm.showToast("先去 设置 › ${if (id.startsWith("mcp_")) "MCP 服务" else "连接器"} 连接「$name」")
                     },
                 ) {
@@ -995,13 +995,13 @@ private fun ToolPickerSheet(vm: ChatViewModel, onDismiss: () -> Unit) {
             }
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 OutlinedButton(
-                    onClick = { selected.clear() },
+                    onClick = { selected.clear(); vm.setEnabledTools(emptyList()) },
                     modifier = Modifier.weight(1f)
                 ) { Text("清除选择", color = Ink3) }
                 Button(
                     onClick = { vm.setEnabledTools(selected.toList()); onDismiss() },
                     modifier = Modifier.weight(1f)
-                ) { Text(if (selected.isEmpty()) "确定（全部可用）" else "确定（${selected.size} 个来源）") }
+                ) { Text(if (selected.isEmpty()) "完成（全部可用）" else "完成（${selected.size} 个来源）") }
             }
         }
     }
