@@ -498,7 +498,7 @@ class ChatViewModel(
             "【富卡片】需要结构化展示（清单/对比/关键数据）时，可在回复里插 ```ui-card 围栏块，" +
             "内容为 JSON：{\"type\":\"note|list|kv|action\",\"title\":\"...\",\"body\":\"...\",\"items\":[...],\"data\":{...}}；" +
             "客户端会渲染成卡片，普通文字仍用 Markdown。" +
-            "【工具使用】查资料/新闻/事实核实用 web_search；跑命令/操作文件/数据处理用 linux 工具（Alpine 容器）；" +
+            "【工具使用】查资料/新闻/事实核实用 web_search；跑命令/操作文件/数据处理用 linux 工具（不要假设发行版与已装软件，动手前先 uname -a / cat /etc/os-release / which 自检环境）；" +
             "需要了解用户手机当前屏幕内容或替用户点返回/主页时用 phone_screen（需用户已在设置开启屏幕服务）；" +
             "短信/通话记录等权限被系统拒绝时，先让用户装好并启动 Shizuku，再用 phone_sys(shizuku_grant) 一键授权后重试。" +
             "今天的日期：${df.format(java.util.Date())}。" +
@@ -552,6 +552,30 @@ class ChatViewModel(
         return trimmed.drop(start)
     }
 
+    /** 手动压缩：把当前对话旧轮次摘要成一条笔记替换（保留最近两条消息）。 */
+    fun compactConversation(c: Conversation) {
+        if (c.messages.size <= 3) { _toast.value = "对话还很短，无需压缩"; return }
+        val keep = c.messages.takeLast(2)
+        val old = c.messages.dropLast(2)
+        val digest = old.joinToString("\n") { m ->
+            when {
+                m.toolCalls.isNotEmpty() -> "[AI 调用工具] " + m.toolCalls.joinToString(",") { it.name }
+                else -> "[${m.role}] " + m.content.take(800)
+            }
+        }
+        viewModelScope.launch {
+            val cfg = config
+            val summary = withContext(Dispatchers.IO) {
+                client.complete(cfg, "把以下对话历史压缩成要点笔记，必须保留：用户目标与约束、已完成的步骤与结果、关键数据/文件路径、待办与未解决的问题。直接输出笔记本身：\n" + digest, maxTokens = 700).getOrNull()
+            }
+            if (summary.isNullOrBlank()) { _toast.value = "压缩失败，请稍后重试"; return@launch }
+            val note = Message(com.chengyan.app.data.IdGen.next(), "user", "【对话压缩摘要（手动压缩生成，可继续在此之上对话）】\n" + summary, System.currentTimeMillis())
+            c.messages.clear(); c.messages.add(note); c.messages.addAll(keep)
+            c.updated = System.currentTimeMillis(); persist(); refreshUi(c, force = true)
+            _toast.value = "已压缩 ${old.size} 条旧消息"
+        }
+    }
+
     /** 首轮回复成功后用 LLM 自动起标题（ChatGPT/Open WebUI 惯例）；失败静默保留占位标题。 */
     private fun autoTitle(c: Conversation) {
         val firstUser = c.messages.firstOrNull { it.role == "user" } ?: return
@@ -586,6 +610,40 @@ class ChatViewModel(
         streamJob = viewModelScope.launch {
             try {
                 var turns = history
+                // AI 自己压缩上下文：估算超预算时，把将被裁掉的旧轮次让模型摘要成笔记，
+                // 以「压缩摘要」user 消息放回上下文，替代硬裁剪——任务连续性不丢。
+                runCatching {
+                    val sys = turns.filter { it.role == "system" }
+                    val rest = turns.filterNot { it.role == "system" }
+                    val est = { t: OpenAiClient.ChatTurn ->
+                        t.text.length / 2 + t.images.size * 800 + t.parts.sumOf { it.data.length / 2 + 800 }
+                    }
+                    val cbudget = (config.contextWindow * (quroConfig.contextCompressThreshold.takeIf { it in 1..100 } ?: 80) / 100)
+                        .coerceAtLeast(4096)
+                    var used = turns.sumOf { est(it) }
+                    var cut = 0
+                    while (used > cbudget && cut < rest.size - 2) { used -= est(rest[cut]); cut++ }
+                    if (cut > 0) {
+                        val dropped = rest.take(cut)
+                        val digest = dropped.joinToString("\n") { t ->
+                            when {
+                                t.toolCallId.isNotBlank() -> "[工具结果] " + t.text.take(400)
+                                t.toolCalls.isNotEmpty() -> "[AI 调用工具] " + t.toolCalls.joinToString(",") { it.name }
+                                else -> "[${t.role}] " + t.text.take(800)
+                            }
+                        }
+                        val summary = client.complete(
+                            config,
+                            "把以下对话历史压缩成要点笔记，必须保留：用户目标与约束、已完成的步骤与结果、关键数据/文件路径、待办与未解决的问题。直接输出笔记本身：\n" + digest,
+                            maxTokens = 700
+                        ).getOrNull()
+                        turns = if (!summary.isNullOrBlank()) {
+                            sys + OpenAiClient.ChatTurn("user", "【早期对话的自动压缩摘要（系统生成，供延续任务参考）】\n" + summary) + rest.drop(cut)
+                        } else {
+                            sys + rest.drop(cut)   // 摘要失败退回硬裁剪
+                        }
+                    }
+                }
                 var iter = 0
                 var cancelled = false
                 while (true) {
@@ -629,8 +687,8 @@ class ChatViewModel(
 
                     // 模型没有发起工具调用 → 最终回答完成
                     // iter 是「模型往返轮数」不是工具个数：一轮里可含多个 tool_call。
-                    // 9 个工具可能需要多轮往返编排，上限放宽到 16，避免长任务被提前截断。
-                    if (pendingCalls.isEmpty() || iter >= 16) {
+                    // 长程任务不设低上限：一直执行直到任务完成或确实无法继续（64 轮往返足够长程编排）。
+                    if (pendingCalls.isEmpty() || iter >= 64) {
                         ai.content = contentBuf.toString().ifBlank { ai.content.ifBlank { "（模型返回了空回复）" } }
                         break
                     }

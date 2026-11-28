@@ -28,6 +28,7 @@ import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.AddPhotoAlternate
+import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.AttachFile
 import androidx.compose.material.icons.rounded.Menu
 import androidx.compose.material.icons.rounded.MoreVert
@@ -197,6 +198,11 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit, onOpenPrefs: () ->
                                 text = { Text("对话设置", fontSize = 14.sp) },
                                 onClick = { menuOpen = false; onOpenPrefs() },
                                 leadingIcon = { Icon(Icons.Rounded.Tune, null, Modifier.size(17.dp), tint = Ink3) },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("压缩上下文", fontSize = 14.sp) },
+                                onClick = { menuOpen = false; vm.current?.let { vm.compactConversation(it) } },
+                                leadingIcon = { Icon(Icons.Rounded.AutoAwesome, null, Modifier.size(17.dp), tint = Ink3) },
                             )
                             DropdownMenuItem(
                                 text = { Text("系统能力与权限", fontSize = 14.sp) },
