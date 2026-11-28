@@ -48,4 +48,15 @@ object ShizukuBridge {
             }.getOrDefault(false)
             p to ok
         }
+
+    /** shell uid 执行命令并捕获 stdout+stderr（阻塞；Shizuku 已授权时可用）。 */
+    fun exec(cmd: String, timeoutMs: Long = 20_000): String? = runCatching {
+        val binder = Shizuku.getBinder() ?: return null
+        val service = moe.shizuku.server.IShizukuService.Stub.asInterface(ShizukuBinderWrapper(binder))
+        val remote = service.newProcess(arrayOf("sh", "-c", cmd), null, null)
+        val out = android.os.ParcelFileDescriptor.AutoCloseInputStream(remote.inputStream).bufferedReader(Charsets.UTF_8).readText()
+        val err = android.os.ParcelFileDescriptor.AutoCloseInputStream(remote.errorStream).bufferedReader(Charsets.UTF_8).readText()
+        remote.waitFor()
+        (out + err).trim()
+    }.getOrNull()
 }

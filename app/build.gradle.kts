@@ -12,8 +12,8 @@ android {
         applicationId = "com.chengyan.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 32
-        versionName = "1.9.32"
+        versionCode = 33
+        versionName = "1.9.33"
         // 构建指纹：终端/自检里直接可见，杜绝"装的到底是不是新包"的版本错位问题。
         // 优先取构建命令注入的 -PBUILD_COMMIT=<远端HEAD>（发布包必须带，与 GitHub main 一一对应）；
         // 没注入时退回本地 git（开发期）。
@@ -90,6 +90,11 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("com.squareup.okhttp3:okhttp-sse:4.12.0")
+    // 无线调试 ADB（TLS 导出密钥）+ 密钥/证书生成 + SAF 工作区
+    implementation("org.conscrypt:conscrypt-android:2.5.2")
+    implementation("org.bouncycastle:bcprov-jdk15on:1.70")
+    implementation("org.bouncycastle:bcpkix-jdk15on:1.70")
+    implementation("androidx.documentfile:documentfile:1.0.1")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
     testImplementation("junit:junit:4.13.2")

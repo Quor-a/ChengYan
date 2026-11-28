@@ -15,8 +15,15 @@ import com.chengyan.app.data.LinuxBridge
  * 放到 Application.onCreate 里，进程起来就一定有 Context，和界面是否组合无关。
  */
 class ChengYanApp : Application() {
+    companion object {
+        /** 全局实例：adb 等无 Context 工具类取 filesDir 用。 */
+        @JvmStatic lateinit var instance: ChengYanApp
+            private set
+    }
+
     override fun onCreate() {
         super.onCreate()
+        instance = this
         LinuxBridge.init(this)
     }
 }

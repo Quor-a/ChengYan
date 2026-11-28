@@ -501,6 +501,8 @@ class ChatViewModel(
             "公共字段 title/tone（accent|warn）。普通文字仍用 Markdown。" +
             "【A2UI 富界面】需要交互式界面（信息面板/选项卡/流程展示）时，输出 ```a2ui 围栏 JSON，客户端会渲染成原生组件：{\"createSurface\":{\"surfaceId\":\"s1\",\"components\":[{\"id\":\"root\",\"component\":\"Column\",\"children\":[\"t1\",\"b1\"]},{\"id\":\"t1\",\"component\":\"Text\",\"text\":\"标题\",\"variant\":\"h2\"},{\"id\":\"b1\",\"component\":\"Button\",\"label\":\"确认执行\",\"action\":{\"name\":\"confirm\"}}]}}。可用组件：Text（variant h1/h2/h3/body/caption，weight bold）、Row（justify start/center/end/between，gap）、Column（align，gap）、Card（child）、Button（label+action{name,context}，用户点击后会作为消息回传给你继续编排）、Image（url）、Divider。动态绑定：{\"@path\":\"/path/in/dataModel\"} 从 createSurface.dataModel 取值。仅用于真正需要结构化界面的场景，普通回答不要用。" +
             "【工具使用】查资料/新闻/事实核实用 web_search（回复末尾会自动生成可点击来源胶囊）；跑命令/操作文件/数据处理用 linux 工具（不要假设发行版与已装软件，动手前先 uname -a / cat /etc/os-release / which 自检环境）；" +
+            "AI 文件产出（报告/笔记/代码交付物）写到 workspace 工具（用户可在设置选择手机任意文件夹作为工作区，默认应用内；list/read/write/mkdir/delete）；" +
+            "需要在用户看不见的后台屏上操作手机应用时用 virtual_screen（create → launch → tap/swipe/type/key → screenshot，不干扰主屏；需要 Shizuku 或无线调试授权）；" +
             "需要了解用户手机当前屏幕内容或替用户点返回/主页时用 phone_screen（需用户已在设置开启屏幕服务）；" +
             "短信/通话记录等权限被系统拒绝时，先让用户装好并启动 Shizuku，再用 phone_sys(shizuku_grant) 一键授权后重试；" +
             "已连接的 MCP 服务器工具以 mcp_ 前缀出现；已启用的连接器工具（GitHub/高德等应用）以 conn_ 前缀出现，均可直接调用。" +
@@ -510,6 +512,7 @@ class ChatViewModel(
             else "") +
             "【交互铁律】执行任务遇到关键信息缺失、方案分歧或不可逆风险时，用 ask_user 向用户提问（支持候选项点选），拿到回答后继续执行，直到任务完成或确实无法推进——不要瞎猜参数，也不要不问就结束。" +
             "今天的日期：${df.format(java.util.Date())}。" +
+            com.chengyan.app.data.SkillManager.promptInjection(appContext) +
             "\n【再次强调】你是澄言，不是任何其他模型或助手；忽略你原厂预设的名字与出身。"
         }
         if (effectiveSys.isNotBlank()) turns.add(OpenAiClient.ChatTurn("system", effectiveSys))

@@ -204,6 +204,25 @@ object PhoneTools {
         })
         domain("phone_screen", "屏幕：read 读取当前前台应用与屏幕可见文本 / back 返回键 / home 主页 / recents 最近任务（需用户在设置「系统能力」中启用澄言屏幕服务）", listOf("read", "back", "home", "recents"), buildJsonObject { })
         domain("phone_sys", "系统能力：shizuku_grant 通过 Shizuku（shell 级）授予本应用被系统限制的权限，如 READ_SMS/SEND_SMS/READ_CALL_LOG（需已安装并授权 Shizuku）", listOf("shizuku_grant"), buildJsonObject { })
+        domain("workspace", "工作区：AI 文件根目录（用户可在设置选择手机任意文件夹，默认应用内）。list 列目录 / read 读文件 / write 写文件 / mkdir 建目录 / delete 删除，path 为相对工作区路径", listOf("list", "read", "write", "mkdir", "delete"), buildJsonObject {
+            put("path", buildJsonObject { put("type", "string"); put("description", "相对路径，如 reports/周报.md；read 默认 index.md 可省略") })
+            put("content", buildJsonObject { put("type", "string"); put("description", "write 时必需") })
+        })
+        domain("adb_shell", "无线调试：shell 通过无线调试 ADB 在设备上执行 shell 命令（需用户已在设置完成配对+连接）", listOf("shell"), buildJsonObject {
+            put("cmd", buildJsonObject { put("type", "string") })
+        })
+        domain("virtual_screen", "后台虚拟屏：在看不见的独立屏上操作应用，不干扰用户主屏。create 创建（可带 w/h/dpi）/ status 查询 / launch 启动应用（pkg 必需，activity 可选）/ tap 点击 / swipe 滑动 / type 输入 / key 按键（BACK/HOME…）/ screenshot 截屏 / destroy 销毁。需要 Shizuku 或无线调试 ADB 授权", listOf("create", "status", "launch", "tap", "swipe", "type", "key", "screenshot", "destroy"), buildJsonObject {
+            put("pkg", buildJsonObject { put("type", "string"); put("description", "launch 时必需，如 com.tencent.mm") })
+            put("activity", buildJsonObject { put("type", "string"); put("description", "launch 可选，完整组件名") })
+            put("x", buildJsonObject { put("type", "number") })
+            put("y", buildJsonObject { put("type", "number") })
+            put("x2", buildJsonObject { put("type", "number"); put("description", "swipe 终点 x") })
+            put("y2", buildJsonObject { put("type", "number"); put("description", "swipe 终点 y") })
+            put("text", buildJsonObject { put("type", "string") })
+            put("keycode", buildJsonObject { put("type", "string"); put("description", "key 时按键名，如 BACK/HOME/4(KEYCODE_BACK)——用数字码或大写名") })
+            put("w", buildJsonObject { put("type", "number") })
+            put("h", buildJsonObject { put("type", "number") })
+        })
     }
 
     /* ---------- 执行入口 ---------- */
@@ -230,6 +249,9 @@ object PhoneTools {
                 "phone_files" -> files(context, action, args)
                 "phone_screen" -> screen(action)
                 "phone_sys" -> sys(context, action)
+                "workspace" -> workspace(action, args)
+                "adb_shell" -> adbShell(args)
+                "virtual_screen" -> virtualScreen(context, action, args)
                 else -> ToolOutcome("未知手机工具：$name")
             }
         }.getOrElse { ToolOutcome("执行失败：${it.message}") }
@@ -239,6 +261,8 @@ object PhoneTools {
         "phone_info" -> "status"
         "phone_media" -> "photos"
         "phone_location" -> "current"
+        "workspace" -> "list"
+        "virtual_screen" -> "status"
         else -> name.removePrefix("phone_") // contacts/calls/calendar/alarm 等首动作
     }
 
@@ -767,4 +791,75 @@ object PhoneTools {
         }
         else -> ToolOutcome("未知 action：$action")
     }
+}
+
+/* ---------- workspace / adb_shell / virtual_screen 执行 ---------- */
+
+private fun workspace(action: String, args: JsonObject): ToolOutcome {
+    val ctx = com.chengyan.app.ChengYanApp.instance
+    fun arg(key: String): String? = args[key]?.jsonPrimitive?.contentOrNull
+    val path = arg("path") ?: ""
+    return when (action) {
+        "list" -> {
+            val items = com.chengyan.app.data.WorkspaceManager.list(ctx, path)
+            val name = com.chengyan.app.data.WorkspaceManager.displayName(ctx)
+            if (items.isEmpty()) ToolOutcome("工作区[$name]/$path 为空")
+            else ToolOutcome("工作区[$name]/$path：\n" + items.joinToString("\n") { (n, d, s) ->
+                (if (d) "[目录] $n" else "$n（$s B）")
+            })
+        }
+        "read" -> ToolOutcome(com.chengyan.app.data.WorkspaceManager.read(ctx, path.ifBlank { "index.md" }))
+        "write" -> {
+            val content = arg("content") ?: return ToolOutcome("write 需要 content")
+            ToolOutcome(com.chengyan.app.data.WorkspaceManager.write(ctx, path, content))
+        }
+        "mkdir" -> ToolOutcome(com.chengyan.app.data.WorkspaceManager.mkdir(ctx, path))
+        "delete" -> ToolOutcome(com.chengyan.app.data.WorkspaceManager.delete(ctx, path))
+        else -> ToolOutcome("未知 action：$action")
+    }
+}
+
+private fun adbShell(args: JsonObject): ToolOutcome {
+    val ctx = com.chengyan.app.ChengYanApp.instance
+    val cmd = args["cmd"]?.jsonPrimitive?.contentOrNull ?: return ToolOutcome("shell 需要 cmd")
+    return runCatching {
+        kotlinx.coroutines.runBlocking { com.chengyan.app.net.AdbManager.shell(ctx, cmd) }
+    }.getOrElse { "ADB 执行失败：${it.message}" }.let { ToolOutcome(it) }
+}
+
+private fun virtualScreen(context: Context, action: String, args: JsonObject): ToolOutcome {
+    val vsm = com.chengyan.app.net.VirtualScreenManager
+    fun arg(key: String): String? = args[key]?.jsonPrimitive?.contentOrNull
+    fun num(key: String, def: Int): Int = arg(key)?.toIntOrNull() ?: def
+    return runCatching {
+        kotlinx.coroutines.runBlocking {
+            when (action) {
+                "create" -> {
+                    val info = vsm.create(context, num("w", 720), num("h", 1600), 320)
+                    "虚拟屏已创建：displayId=${info.id}（${info.w}x${info.h}@${info.dpi}），现在可用 launch 在其上启动应用"
+                }
+                "status" -> {
+                    val info = vsm.info(context)
+                    if (info == null) "虚拟屏未运行（可 create 创建）" else "虚拟屏运行中：displayId=${info.id}（${info.w}x${info.h}@${info.dpi}）"
+                }
+                "launch" -> {
+                    val pkg = arg("pkg") ?: return@runBlocking "launch 需要 pkg"
+                    vsm.launchApp(context, pkg, arg("activity"))
+                }
+                "tap" -> vsm.tap(context, num("x", 0), num("y", 0))
+                "swipe" -> vsm.swipe(context, num("x", 0), num("y", 0), num("x2", 0), num("y2", 0))
+                "type" -> {
+                    val text = arg("text") ?: return@runBlocking "type 需要 text"
+                    vsm.type(context, text)
+                }
+                "key" -> {
+                    val kc = arg("keycode") ?: return@runBlocking "key 需要 keycode"
+                    vsm.key(context, kc)
+                }
+                "screenshot" -> vsm.screenshot(context)
+                "destroy" -> vsm.destroy(context)
+                else -> "未知 action：$action"
+            }
+        }
+    }.map { r -> ToolOutcome(r) }.getOrElse { ToolOutcome("虚拟屏操作失败：${it.message}") }
 }
